@@ -73,6 +73,7 @@
                 <MenuItem Header="Modding Tools">
                     <MenuItem Header="Export Selected Subfile"/>
                     <MenuItem Header="Export Selected Package" IsEnabled="{Binding HasSelectedEntry}" Command="{Binding ExportRaw}"/>
+                    <MenuItem Header="Export Selected Package as FBX" IsEnabled="{Binding HasSelectedEntry}" Command="{Binding ExportAsFbxCommand}"/>
                     <Separator></Separator>
                     <MenuItem Header="Replace Selected Subfile"/>
                     <MenuItem Header="Replace Selected Package (BETA)"/>

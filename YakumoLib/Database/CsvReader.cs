@@ -23,8 +23,6 @@ namespace YakumoLib.Database
         string assetsDirectory,
         IProgress<(string fileName, int done, int total, int size)>? progress = null)
         {
-            int filesDone = 0;
-
             var csvFiles = Directory.EnumerateFiles(assetsDirectory, "*.csv", SearchOption.TopDirectoryOnly).ToArray();
             var perFileResults = new ConcurrentBag<Dictionary<UUID, CsvAssetLine>>();
 
@@ -191,7 +189,7 @@ namespace YakumoLib.Database
                     IsCompressed = subCompressedSize != 0,
                     IsGlobal = subGlobalOffset != 0,
                     SourceArchive = Path.GetFileNameWithoutExtension(sourceArchive),
-                    ContentDirectory = Path.GetDirectoryName(sourceArchive)
+                    ContentDirectory = Path.GetDirectoryName(sourceArchive) ?? ""
                 });
             }
 

@@ -134,9 +134,10 @@ namespace YakumoLib.Assets
         public static void ExtractAll(AssetEntry target, string outputDir)
         {
 
-            foreach (SubAssetEntry sub in target.SubEntries)
+            foreach (SubAssetEntry sub in target.SubEntries ?? [])
             {
-                byte[] data = GetSubBlob(sub, target, sub.ContentDirectory);
+                string contentDir = sub.ContentDirectory ?? "";
+                byte[] data = GetSubBlob(sub, target, contentDir);
 
                 Directory.CreateDirectory(Path.Join(outputDir, Path.GetFileNameWithoutExtension(target.FileName)));
                 File.WriteAllBytes(Path.Join(outputDir, Path.GetFileNameWithoutExtension(target.FileName), sub.FileName), data);

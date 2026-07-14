@@ -24,6 +24,7 @@ namespace RONIN
         public MainWindow()
         {
             InitializeComponent();
+            WireModdingMenuItems();
         }
 
         private void TreeViewItem_Selected(object sender, RoutedEventArgs e)
@@ -96,7 +97,7 @@ DataContext is MainWindowViewModel vm)
             if (sender is ListView { SelectedItem: AssetTableEntry entry } &&
   DataContext is MainWindowViewModel vm)
             {
-                AssetEntry aentry = vm.Library.GetByUUID(entry.data);
+                AssetEntry? aentry = vm.Library?.GetByUUID(entry.data);
                 if (aentry != null)
                 {
                     vm.PreviousEntry = vm.SelectedEntry;

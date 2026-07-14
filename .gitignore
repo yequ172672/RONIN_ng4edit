@@ -398,7 +398,11 @@ MSBuild_Logs/
 # BeatPulse healthcheck temp database
 healthchecksdb
 
-# Backup folder for Package Reference Convert tool in Visual Studio 2017
+# RONIN local tooling and generated output
+.omc/
+ExtractedModels/
+RONIN.Test/DeflateSharp.dll
+ronin_release/
 MigrationBackup/
 
 # Ionide (cross platform F# VS Code tools) working folder

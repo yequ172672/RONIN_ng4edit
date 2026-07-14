@@ -1,7 +1,0 @@
-{
-  "tool_name": "Bash",
-  "tool_input_preview": "{\"command\":\"cd \\\"D:\\\\code\\\\Game\\\\RONIN_ng4edit-main\\\" && git status\",\"description\":\"Check current git status\"}",
-  "error": "Exit code 128\nfatal: not a git repository (or any of the parent directories): .git",
-  "timestamp": "2026-07-14T13:50:31.290Z",
-  "retry_count": 1
-}

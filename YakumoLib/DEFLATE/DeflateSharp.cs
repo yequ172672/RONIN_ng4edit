@@ -18,6 +18,14 @@ namespace YakumoLib.DEFLATE
             uint numWorkers
             );
 
+        [LibraryImport("DeflateSharp.dll")]
+        [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+        public static partial int GDeflate_Compress(
+            IntPtr inputBuffer, nuint inputSize,
+            IntPtr outputBuffer, nuint outputSize,
+            uint numWorkers
+            );
+
 
     }
 }
