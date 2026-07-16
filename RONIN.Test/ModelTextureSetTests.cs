@@ -1,0 +1,511 @@
+using System.Security.Cryptography;
+using System.Buffers.Binary;
+using YakumoLib;
+using YakumoLib.Assets;
+using YakumoLib.Formats;
+using YakumoLib.Modding;
+using BCnEncoder.Decoder;
+using BCnEncoder.Encoder;
+using BCnEncoder.Shared;
+
+public static class ModelTextureSetTests
+{
+    public static void Run()
+    {
+        var model = Entry("Assets/Character/PL/PL0000/Model/DDX1/PL0000_DDX1", AssetType.SkeletalMesh, "00000001-00000000-00000000-00000000");
+        var entries = new[] { Entry("assets/character/pl/pl0000/model/ddx1/texture/pl0000_ddx1_Normal", AssetType.Texture, "00000003-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Texture/PL0000_DDX1_BaseCol", AssetType.Texture, "00000002-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Texture/PL0000_DDX1_BaseColAlias", AssetType.Texture, "00000002-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Texture/PL0000_DDX1_MRO", AssetType.Texture, "00000004-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Texture/PL0000_DDX1_Mask", AssetType.Texture, "00000005-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Materials/PL0000_DDX1_BaseCol", AssetType.Texture, "00000006-00000000-00000000-00000000"), Entry("Assets/Character/PL/PL0000/Model/DDX1/Texture/PL0000_DDX1_BaseCol.mesh", AssetType.StaticMesh, "00000007-00000000-00000000-00000000") };
+        var candidates = ModelTextureSetService.DiscoverCandidates(model, entries);
+        if (candidates.Count != 4 || candidates[0].Asset.FileName != "PL0000_DDX1_BaseCol" || candidates[0].UsageHint != "BaseCol" || candidates[1].UsageHint != "MRO" || candidates[2].UsageHint != "Mask" || candidates[3].UsageHint != "Normal") throw new Exception("Candidate discovery contract failed.");
+        if (ModelTextureSetService.ClassifyUsage("x_ColorMask.dds") != "ColorMask" || ModelTextureSetService.ClassifyUsage("x_other.dds") != "Unknown" || ModelTextureSetService.ClassifyUsage("PL0000_DDX1_Cloth1_BaseCol_AAA3.dds") != "BaseCol" || ModelTextureSetService.ClassifyUsage("PL0000_DDX1_Normal_NNNx.dds") != "Normal" || ModelTextureSetService.ClassifyUsage("PL0000_DDX1_Mask_MROx.dds") != "MRO" || ModelTextureSetService.ClassifyUsage("PL0000_DDX1_ColorMask_BBBB.dds") != "ColorMask" || ModelTextureSetService.ClassifyUsage("PL0000_DDX1_IridescentMask_AAAx.dds") != "Mask") throw new Exception("Usage classification failed.");
+        var timestamp = DateTimeOffset.Parse("2026-07-15T10:20:30Z");
+        var manifest = new ModelTextureSetManifest(1, model.StringAssetID, model.Path, timestamp, candidates.Select(ModelTextureSetService.ToManifestEntry).ToArray());
+        var json = ModelTextureSetService.SerializeManifest(manifest);
+        if (!json.Contains("\"schemaVersion\"") || !json.Contains("\"exportedAtUtc\"")) throw new Exception("Manifest naming failed.");
+        var roundTrip = ModelTextureSetService.DeserializeManifest(json);
+        if (roundTrip.SchemaVersion != manifest.SchemaVersion || roundTrip.ModelAssetId != manifest.ModelAssetId || roundTrip.ModelPath != manifest.ModelPath || roundTrip.ExportedAtUtc != timestamp || roundTrip.Textures.Count != manifest.Textures.Count || roundTrip.Textures.Zip(manifest.Textures).Any(pair => pair.First != pair.Second)) throw new Exception("Manifest round-trip failed.");
+        TestDx10PaddedMipAssembly();
+        TestSupportedMipFormats();
+        TestSrgbMipFiltering();
+        TestBc5NormalFiltering();
+        TestRootFormatTranscoding();
+        TestChangedOnlyImportPlanning();
+        TestRealExport();
+        Console.WriteLine("Model texture set focused tests passed.");
+    }
+
+    private static void TestSupportedMipFormats()
+    {
+        foreach ((int format, int rootLength) in new[] { (71, 32), (72, 32), (77, 64), (78, 64), (80, 32), (83, 64) })
+        {
+            byte[] root = new byte[148 + rootLength];
+            CreateDx10Header(8, 8, 1, format, rootLength).CopyTo(root, 0);
+            root.AsSpan(148).Fill(0x45);
+            byte[] full = TextureMipChainGenerator.Generate(root, 4);
+            int blockBytes = format is 71 or 72 or 80 ? 8 : 16;
+            int expectedLength = 148 + rootLength + blockBytes * 3;
+            if (full.Length != expectedLength || BinaryPrimitives.ReadUInt32LittleEndian(full.AsSpan(28, 4)) != 4 || BinaryPrimitives.ReadUInt32LittleEndian(full.AsSpan(128, 4)) != format)
+                throw new Exception($"DXGI {format} mip generation contract failed.");
+        }
+    }
+
+    private static void TestSrgbMipFiltering()
+    {
+        byte[] rgba = new byte[4 * 4 * 4];
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        {
+            byte value = (x + y) % 2 == 0 ? (byte)0 : (byte)255;
+            int offset = (y * 4 + x) * 4;
+            rgba[offset] = rgba[offset + 1] = rgba[offset + 2] = value; rgba[offset + 3] = 255;
+        }
+        byte[] full = TextureMipChainGenerator.Generate(CreateRootDds(4, 4, 78, rgba), 2);
+        byte[] lower = TexturePackageDds.SplitForImport(full).MipPayloads[1];
+        ColorRgba32[] decoded = new BcDecoder().DecodeRaw(lower, 2, 2, CompressionFormat.Bc3);
+        if (decoded.Any(pixel => pixel.r < 165 || pixel.r > 215 || Math.Abs(pixel.r - pixel.g) > 4))
+            throw new Exception("sRGB mip filtering did not average color in linear space.");
+    }
+
+    private static void TestBc5NormalFiltering()
+    {
+        byte[] rgba = new byte[4 * 4 * 4];
+        for (int y = 0; y < 4; y++) for (int x = 0; x < 4; x++)
+        {
+            int offset = (y * 4 + x) * 4;
+            bool xNormal = (x + y) % 2 == 0;
+            rgba[offset] = xNormal ? (byte)255 : (byte)128;
+            rgba[offset + 1] = xNormal ? (byte)128 : (byte)255;
+            rgba[offset + 2] = 0; rgba[offset + 3] = 255;
+        }
+        byte[] full = TextureMipChainGenerator.Generate(CreateRootDds(4, 4, 83, rgba), 2);
+        byte[] lower = TexturePackageDds.SplitForImport(full).MipPayloads[1];
+        ColorRgba32[] decoded = new BcDecoder().DecodeRaw(lower, 2, 2, CompressionFormat.Bc5);
+        if (decoded.Any(pixel => pixel.r < 208 || pixel.g < 208 || pixel.r > 230 || pixel.g > 230))
+            throw new Exception("BC5 mip filtering did not renormalize averaged normal vectors.");
+    }
+
+    private static void TestRootFormatTranscoding()
+    {
+        byte[] rgba = Enumerable.Repeat(new byte[] { 210, 40, 90, 255 }, 16).SelectMany(value => value).ToArray();
+        byte[] bc7Payload = new BcEncoder(CompressionFormat.Bc7).EncodeToRawBytes(rgba, 4, 4, PixelFormat.Rgba32)[0];
+        byte[] edited = new byte[148 + bc7Payload.Length];
+        CreateDx10Header(4, 4, 1, 99, bc7Payload.Length).CopyTo(edited, 0);
+        bc7Payload.CopyTo(edited, 148);
+        byte[] template = CreateRootDds(4, 4, 72, new byte[4 * 4 * 4]);
+
+        byte[] converted = TextureMipChainGenerator.TranscodeRoot(edited, template);
+        if (BinaryPrimitives.ReadUInt32LittleEndian(converted.AsSpan(128, 4)) != 72 || converted.Length != template.Length)
+            throw new Exception("Edited DDS was not transcoded back to the template DXGI format.");
+        ColorRgba32 pixel = new BcDecoder().DecodeRaw(converted.AsSpan(148).ToArray(), 4, 4, CompressionFormat.Bc1)[0];
+        if (pixel.r < 180 || pixel.g > 80 || pixel.b < 60)
+            throw new Exception("DDS format transcoding did not preserve the edited pixel color.");
+    }
+
+    private static byte[] CreateRootDds(int width, int height, int dxgiFormat, byte[] rgba)
+    {
+        CompressionFormat format = dxgiFormat switch { 71 or 72 => CompressionFormat.Bc1, 77 or 78 => CompressionFormat.Bc3, 80 => CompressionFormat.Bc4, 83 => CompressionFormat.Bc5, _ => throw new ArgumentOutOfRangeException(nameof(dxgiFormat)) };
+        byte[] payload = new BcEncoder(format).EncodeToRawBytes(rgba, width, height, PixelFormat.Rgba32)[0];
+        byte[] root = new byte[148 + payload.Length];
+        CreateDx10Header(width, height, 1, dxgiFormat, payload.Length).CopyTo(root, 0);
+        payload.CopyTo(root, 148);
+        return root;
+    }
+
+    private static byte[] MakeVisiblePixelEdit(byte[] root)
+    {
+        int width = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(root.AsSpan(16, 4)));
+        int height = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(root.AsSpan(12, 4)));
+        int dxgi = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(root.AsSpan(128, 4)));
+        CompressionFormat format = dxgi switch { 71 or 72 => CompressionFormat.Bc1, 77 or 78 => CompressionFormat.Bc3, 80 => CompressionFormat.Bc4, 83 => CompressionFormat.Bc5, _ => throw new InvalidDataException() };
+        ColorRgba32[] pixels = new BcDecoder().DecodeRaw(root.AsSpan(148).ToArray(), width, height, format);
+        ColorRgba32 pixel = pixels[0];
+        pixels[0] = new ColorRgba32((byte)(pixel.r > 127 ? 0 : 255), pixel.g, pixel.b, pixel.a);
+        byte[] rgba = pixels.SelectMany(value => new[] { value.r, value.g, value.b, value.a }).ToArray();
+        byte[] payload = new BcEncoder(format).EncodeToRawBytes(rgba, width, height, PixelFormat.Rgba32)[0];
+        byte[] edited = root.AsSpan(0, 148).ToArray().Concat(payload).ToArray();
+        return edited.AsSpan().SequenceEqual(root) ? throw new Exception("Controlled visible pixel edit did not change DDS bytes.") : edited;
+    }
+
+    private static void TestChangedOnlyImportPlanning()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"ronin-texture-import-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            AssetEntry first = CreateSyntheticTexture(directory, "first.dat", "Texture/First", "00000010-00000000-00000000-00000000", 78);
+            AssetEntry second = CreateSyntheticTexture(directory, "second.dat", "Texture/Second", "00000011-00000000-00000000-00000000", 78);
+            WriteImportSet(directory, [first, second]);
+
+            ModelTextureImportPlan unchanged = ModelTextureSetService.PlanImport(directory, [first, second]);
+            if (unchanged.Changes.Count != 0 || unchanged.UnchangedCount != 2)
+                throw new Exception("Unchanged texture set produced modifications.");
+
+            string changedPath = Path.Combine(directory, "First.dds");
+            byte[] changedRoot = MakeVisiblePixelEdit(File.ReadAllBytes(changedPath));
+            File.WriteAllBytes(changedPath, changedRoot);
+            ModelTextureImportPlan changed = ModelTextureSetService.PlanImport(directory, [first, second]);
+            if (changed.Changes.Count != 1 || changed.UnchangedCount != 1)
+                throw new Exception("Changed-only planning did not select exactly one texture.");
+            ModifiedAssetEntry modification = changed.Changes.Single();
+            if (modification.ParentEntry.AssetID != first.AssetID || modification.SubEntry is not null)
+                throw new Exception("Texture import plan targeted the wrong package or a subfile.");
+            TexturePackageImportResult split = TexturePackageDds.SplitForImport(modification.ModifiedData);
+            if (split.MipPayloads.Count != 4 || split.MipPayloads.Select(x => x.Length).SequenceEqual([64, 16, 16, 16]) == false)
+                throw new Exception("Texture import did not regenerate the complete logical mip chain.");
+
+            TestChangedTexturePatchLayout(directory, modification, first);
+
+            byte[] canonicalManifest = File.ReadAllBytes(Path.Combine(directory, ModelTextureSetService.ManifestFileName));
+            byte[] canonicalFirst = changedRoot;
+            byte[] canonicalSecond = File.ReadAllBytes(Path.Combine(directory, "Second.dds"));
+            void Restore()
+            {
+                File.WriteAllBytes(Path.Combine(directory, ModelTextureSetService.ManifestFileName), canonicalManifest);
+                File.WriteAllBytes(Path.Combine(directory, "First.dds"), canonicalFirst);
+                File.WriteAllBytes(Path.Combine(directory, "Second.dds"), canonicalSecond);
+            }
+            void Reject(string scenario, Action mutation)
+            {
+                Restore();
+                mutation();
+                AssertPlanImportThrows(directory, [first, second], scenario);
+            }
+
+            AssertPlanImportThrows(directory, [first, first], "duplicate asset UUID");
+            Reject("missing DDS", () => File.Delete(Path.Combine(directory, "Second.dds")));
+            Reject("mismatched UUID", () => RewriteManifest(directory, manifest => manifest with { Textures = manifest.Textures.Select((entry, index) => index == 0 ? entry with { AssetId = "00000099-00000000-00000000-00000000" } : entry).ToArray() }));
+            Reject("duplicate manifest UUID", () => RewriteManifest(directory, manifest => manifest with { Textures = manifest.Textures.Select((entry, index) => index == 0 ? entry with { AssetId = manifest.Textures[1].AssetId } : entry).ToArray() }));
+            Reject("mismatched logical path", () => RewriteManifest(directory, manifest => manifest with { Textures = manifest.Textures.Select((entry, index) => index == 0 ? entry with { LogicalPath = "Texture/Wrong" } : entry).ToArray() }));
+            Reject("changed dimensions", () => { byte[] dds = File.ReadAllBytes(Path.Combine(directory, "First.dds")); BinaryPrimitives.WriteUInt32LittleEndian(dds.AsSpan(16, 4), 4); File.WriteAllBytes(Path.Combine(directory, "First.dds"), dds); });
+            Reject("unsupported format", () => RewriteManifest(directory, manifest => manifest with { Textures = manifest.Textures.Select((entry, index) => index == 0 ? entry with { DxgiFormat = 98 } : entry).ToArray() }));
+            Reject("invalid DDS", () => File.WriteAllBytes(Path.Combine(directory, "First.dds"), [1, 2, 3, 4]));
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    private static void RewriteManifest(string directory, Func<ModelTextureSetManifest, ModelTextureSetManifest> mutation)
+    {
+        string path = Path.Combine(directory, ModelTextureSetService.ManifestFileName);
+        ModelTextureSetManifest manifest = ModelTextureSetService.DeserializeManifest(File.ReadAllText(path));
+        File.WriteAllText(path, ModelTextureSetService.SerializeManifest(mutation(manifest)));
+    }
+
+    private static void TestChangedTexturePatchLayout(string sourceDirectory, ModifiedAssetEntry modification, AssetEntry sourceAsset)
+    {
+        TexturePackageImportResult templateImport = TexturePackageDds.CreateTemplateImport(modification.ModifiedData, sourceAsset);
+        TexturePackageImportResult clean = TexturePackageDds.SplitForImport(modification.ModifiedData);
+        SubAssetEntry sourceImage = sourceAsset.SubEntries!.Single(x => x.FileName == "Image.img");
+        byte[] originalImage = AssetExtractor.GetSubBlob(sourceImage, sourceAsset, sourceImage.ContentDirectory);
+        int descriptorLength = clean.MipPayloads.Count * 8;
+        if (!templateImport.HeaderBlob.AsSpan(8, descriptorLength).SequenceEqual(originalImage.AsSpan(8, descriptorLength)))
+            throw new Exception("Template texture descriptor offsets/capacities were not preserved byte-for-byte.");
+        for (int i = 0; i < clean.MipPayloads.Count; i++)
+        {
+            SubAssetEntry sourceMip = sourceAsset.SubEntries!.Single(x => x.FileName == $"mip{i}.img");
+            byte[] originalPadded = AssetExtractor.GetSubBlob(sourceMip, sourceAsset, sourceMip.ContentDirectory);
+            byte[] rebuiltPadded = templateImport.MipPayloads[i];
+            int logicalLength = clean.MipPayloads[i].Length;
+            if (rebuiltPadded.Length != originalPadded.Length ||
+                !rebuiltPadded.AsSpan(0, logicalLength).SequenceEqual(clean.MipPayloads[i]) ||
+                !rebuiltPadded.AsSpan(logicalLength).SequenceEqual(originalPadded.AsSpan(logicalLength)))
+                throw new Exception($"Template mip{i} logical prefix or padding suffix was not preserved correctly.");
+        }
+
+        string assetsDirectory = Path.Combine(Path.GetTempPath(), $"ronin-texture-patch-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(assetsDirectory);
+        try
+        {
+            File.WriteAllText(Path.Combine(assetsDirectory, "@patch_image1.csv"), "header,2,0," + Environment.NewLine);
+            File.WriteAllBytes(Path.Combine(assetsDirectory, "@patch_image1.dat"), []);
+            string patch = PatchGenerator.GeneratePatch(assetsDirectory, [modification], compressData: false);
+            if (patch != "patch_image1") throw new Exception("Texture patch used an unexpected archive.");
+            string[] lines = File.ReadAllLines(Path.Combine(assetsDirectory, "@patch_image1.csv"));
+            if (lines.Length != 2) throw new Exception("Changed-only texture plan emitted more than one parent patch row.");
+            string[] columns = lines[1].Split(',', 8);
+            string[] subfields = columns[7].Split('/');
+            var sizes = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var globalOffsets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            var localOffsets = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < subfields.Length; i += 5)
+            {
+                globalOffsets[subfields[i]] = long.Parse(subfields[i + 1]);
+                localOffsets[subfields[i]] = long.Parse(subfields[i + 2]);
+                sizes[subfields[i]] = long.Parse(subfields[i + 3]);
+            }
+            long imageSize = sourceAsset.SubEntries!.Single(x => x.FileName == "Image.img").Size;
+            if (sizes["Image.img"] != imageSize || sizes["mip0.img"] != 80 || sizes["mip1.img"] != 32 || sizes["mip2.img"] != 32 || sizes["mip3.img"] != 32 || sizes["Metadata.bin"] != 4)
+                throw new Exception("Texture patch did not preserve template subfile capacities.");
+            long parentOffset = long.Parse(columns[1]);
+            if (globalOffsets["Image.img"] != 0 || localOffsets["Image.img"] != 0 ||
+                globalOffsets["Metadata.bin"] != 0 || localOffsets["Metadata.bin"] <= 0 ||
+                globalOffsets["mip0.img"] != parentOffset + imageSize || localOffsets["mip0.img"] != 0)
+                throw new Exception("Texture patch did not preserve local header/metadata and global streamed mip addressing.");
+
+            byte[] patched = File.ReadAllBytes(Path.Combine(assetsDirectory, "@patch_image1.dat"));
+            int imageLength = checked((int)sizes["Image.img"]);
+            int mip0Offset = imageLength;
+            TexturePackageImportResult logical = TexturePackageDds.SplitForImport(modification.ModifiedData);
+            if (!patched.AsSpan(mip0Offset, logical.MipPayloads[0].Length).SequenceEqual(logical.MipPayloads[0]) || patched.Length != imageLength + 80 + 32 + 32 + 32 + 4 || !patched.AsSpan(patched.Length - 4).SequenceEqual(new byte[] { 1, 2, 3, 4 }))
+                throw new Exception("Texture patch payload prefix or padded parent size is incorrect.");
+        }
+        finally { Directory.Delete(assetsDirectory, recursive: true); }
+    }
+
+    private static void WriteImportSet(string directory, IReadOnlyList<AssetEntry> assets)
+    {
+        var entries = new List<ModelTextureSetEntry>();
+        foreach (AssetEntry asset in assets)
+        {
+            TexturePackageDdsData root = TexturePackageDds.ExtractRootMip(asset, directory);
+            string fileName = asset.FileName + ".dds";
+            File.WriteAllBytes(Path.Combine(directory, fileName), root.DdsBytes);
+            entries.Add(new ModelTextureSetEntry(asset.StringAssetID, asset.Path, asset.StoragePath, fileName, "Unknown",
+                root.Width, root.Height, 78, root.MipCount,
+                Convert.ToHexString(SHA256.HashData(root.DdsBytes)).ToLowerInvariant()));
+        }
+        var manifest = new ModelTextureSetManifest(1, "model", "Model", DateTimeOffset.UtcNow, entries);
+        File.WriteAllText(Path.Combine(directory, ModelTextureSetService.ManifestFileName), ModelTextureSetService.SerializeManifest(manifest));
+    }
+
+    private static AssetEntry CreateSyntheticTexture(string directory, string archiveName, string path, string id, int dxgiFormat)
+    {
+        int[] logical = [64, 16, 16, 16];
+        int[] capacities = [80, 32, 32, 32];
+        byte[] ddsHeader = CreateDx10Header(8, 8, 4, dxgiFormat, 64);
+        using var image = new MemoryStream();
+        using (var writer = new BinaryWriter(image, System.Text.Encoding.UTF8, leaveOpen: true))
+        {
+            writer.Write(148 + logical.Sum());
+            writer.Write(4);
+            int virtualOffset = 0;
+            foreach (int capacity in capacities) { writer.Write(virtualOffset); writer.Write(capacity); virtualOffset += capacity; }
+            writer.Write(ddsHeader);
+            writer.Write(new byte[12]);
+        }
+        using var archive = new MemoryStream();
+        var subs = new List<SubAssetEntry>();
+        byte[] imageBytes = image.ToArray();
+        archive.Write(imageBytes);
+        subs.Add(new SubAssetEntry { FileName = "Image.img", Offset = 0, Size = imageBytes.Length, CompressedSize = 0, ContentDirectory = directory, SourceArchive = archiveName, IsGlobal = true, IsCompressed = false });
+        for (int i = 0; i < capacities.Length; i++)
+        {
+            long offset = archive.Position;
+            byte[] payload = Enumerable.Repeat((byte)(0x30 + i), capacities[i]).ToArray();
+            archive.Write(payload);
+            subs.Add(new SubAssetEntry { FileName = $"mip{i}.img", Offset = offset, Size = capacities[i], CompressedSize = 0, ContentDirectory = directory, SourceArchive = archiveName, IsGlobal = true, IsCompressed = false });
+        }
+        long metadataOffset = archive.Position;
+        archive.Write([1, 2, 3, 4]);
+        subs.Add(new SubAssetEntry { FileName = "Metadata.bin", Offset = metadataOffset, Size = 4, CompressedSize = 0, ContentDirectory = directory, SourceArchive = archiveName, IsGlobal = true, IsCompressed = false });
+        byte[] parentBytes = archive.ToArray();
+        File.WriteAllBytes(Path.Combine(directory, archiveName + ".dat"), parentBytes);
+        return Entry(path, AssetType.Texture, id) with
+        {
+            SubEntries = subs, ContentDirectory = directory, StoragePath = path + ".bin",
+            SourceArchive = archiveName, Offset = 0, Size = parentBytes.Length, CompressedSize = 0, Pruned = false
+        };
+    }
+
+    private static void AssertPlanImportThrows(string directory, IReadOnlyList<AssetEntry> assets, string scenario)
+    {
+        try { _ = ModelTextureSetService.PlanImport(directory, assets); }
+        catch (InvalidDataException) { return; }
+        throw new Exception($"Texture import did not reject {scenario}.");
+    }
+
+    private static void TestDx10PaddedMipAssembly()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), $"ronin-texture-dds-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(directory);
+        try
+        {
+            const int headerLength = 148;
+            int[] logicalLengths = [64, 16, 16, 16];
+            int[] capacities = [64, 32, 32, 32];
+            byte[] ddsHeader = CreateDx10Header(8, 8, 4, 78, logicalLengths[0]);
+            using var packageHeader = new MemoryStream();
+            using (var writer = new BinaryWriter(packageHeader, System.Text.Encoding.UTF8, leaveOpen: true))
+            {
+                writer.Write(headerLength + logicalLengths.Sum());
+                writer.Write(logicalLengths.Length);
+                int offset = 0;
+                foreach (int capacity in capacities)
+                {
+                    writer.Write(offset);
+                    writer.Write(capacity);
+                    offset += capacity;
+                }
+                writer.Write(ddsHeader);
+            }
+
+            using var archive = new MemoryStream();
+            var subEntries = new List<SubAssetEntry>();
+            archive.Write(packageHeader.ToArray());
+            subEntries.Add(new SubAssetEntry { FileName = "Image.img", Size = packageHeader.Length, CompressedSize = 0, Offset = 0, SourceArchive = "synthetic", ContentDirectory = directory, IsCompressed = false, IsGlobal = true });
+            for (int i = 0; i < capacities.Length; i++)
+            {
+                long offset = archive.Position;
+                byte value = checked((byte)(0x20 + i));
+                archive.Write(Enumerable.Repeat(value, capacities[i]).Select(x => (byte)x).ToArray());
+                subEntries.Add(new SubAssetEntry { FileName = $"mip{i}.img", Size = capacities[i], CompressedSize = 0, Offset = offset, SourceArchive = "synthetic", ContentDirectory = directory, IsCompressed = false, IsGlobal = true });
+            }
+            File.WriteAllBytes(Path.Combine(directory, "synthetic.dat"), archive.ToArray());
+            var asset = Entry("SyntheticTexture", AssetType.Texture, "00000008-00000000-00000000-00000000") with { SubEntries = subEntries };
+
+            TexturePackageDdsData full = TexturePackageDds.Assemble(asset, packageHeader.ToArray(), directory);
+            if (full.HeaderLength != 148 || full.TotalSize != 260 || full.DdsBytes.Length != 260)
+                throw new Exception($"DX10 logical DDS assembly failed: header={full.HeaderLength}, total={full.TotalSize}, bytes={full.DdsBytes.Length}.");
+            int cursor = headerLength;
+            for (int i = 0; i < logicalLengths.Length; i++)
+            {
+                if (full.DdsBytes.AsSpan(cursor, logicalLengths[i]).ToArray().Any(value => value != 0x20 + i))
+                    throw new Exception($"Logical mip {i} payload was not preserved.");
+                cursor += logicalLengths[i];
+            }
+            TexturePackageDdsData root = TexturePackageDds.ExtractRootMip(asset, directory);
+            if (root.HeaderLength != 148 || root.DdsBytes.Length != 212 || root.TotalSize != 212 || BinaryPrimitives.ReadUInt32LittleEndian(root.DdsBytes.AsSpan(28, 4)) != 1)
+                throw new Exception("Synthetic DX10 root-mip extraction did not preserve the dynamic header and exact logical payload.");
+            if (!root.DdsBytes.AsSpan(148, 64).SequenceEqual(Enumerable.Repeat((byte)0x20, 64).ToArray()))
+                throw new Exception("Synthetic DX10 root-mip bytes are incorrect.");
+
+            byte[] singleDdsHeader = CreateDx10Header(8, 8, 0, 78, logicalLengths[0]);
+            using var singlePackageHeader = new MemoryStream();
+            using (var writer = new BinaryWriter(singlePackageHeader, System.Text.Encoding.UTF8, leaveOpen: true))
+            {
+                writer.Write(headerLength + logicalLengths[0]);
+                writer.Write(1);
+                writer.Write(0);
+                writer.Write(capacities[0]);
+                writer.Write(singleDdsHeader);
+            }
+            TexturePackageDdsData normalizedSingle = TexturePackageDds.Assemble(asset, singlePackageHeader.ToArray(), directory);
+            if (normalizedSingle.MipCount != 1 || normalizedSingle.DdsBytes.Length != 212)
+                throw new Exception("A DDS raw mip count of zero was not normalized to one level.");
+        }
+        finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    private static byte[] CreateDx10Header(int width, int height, int mipCount, int dxgiFormat, int linearSize)
+    {
+        byte[] header = new byte[148];
+        "DDS "u8.CopyTo(header);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4), 124);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(8), 0x000A1007);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(12), checked((uint)height));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(16), checked((uint)width));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(20), checked((uint)linearSize));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(28), checked((uint)mipCount));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(76), 32);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(80), 4);
+        "DX10"u8.CopyTo(header.AsSpan(84));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(108), 0x00401008);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(128), checked((uint)dxgiFormat));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(132), 3);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(140), 1);
+        return header;
+    }
+
+    private static void TestRealExport()
+    {
+        const string assetsDirectory = @"D:\BaiduNetdiskDownload\NINJA GAIDEN 4 The Two Masters\Assets";
+        const string modelPath = "Assets/Character/PL/PL0000/Model/DDX1/PL0000_DDX1";
+        const string textureRoot = "Assets/Character/PL/PL0000/Model/DDX1/Texture/";
+        string destination = Path.Combine(Path.GetTempPath(), $"ronin-texture-set-{Guid.NewGuid():N}");
+
+        try
+        {
+            AssetLibrary library = AssetLibrary.Load(assetsDirectory);
+            AssetEntry model = library.All.Single(entry => entry.Path.Equals(modelPath, StringComparison.OrdinalIgnoreCase));
+            TestTransactionalPreflight(model, library.All, destination);
+            ModelTextureSetManifest exported = ModelTextureSetService.Export(model, library.All, destination);
+            string manifestPath = Path.Combine(destination, ModelTextureSetService.ManifestFileName);
+            if (!File.Exists(manifestPath)) throw new Exception("Export manifest was not created.");
+
+            ModelTextureSetManifest persisted = ModelTextureSetService.DeserializeManifest(File.ReadAllText(manifestPath));
+            if (persisted.SchemaVersion != exported.SchemaVersion || persisted.ModelAssetId != exported.ModelAssetId || persisted.ModelPath != exported.ModelPath || persisted.Textures.Count != exported.Textures.Count || persisted.Textures.Zip(exported.Textures).Any(pair => pair.First != pair.Second) || persisted.Textures.Count == 0) throw new Exception("Persisted export manifest does not match the result.");
+            if (persisted.Textures.Any(entry => !entry.LogicalPath.Replace('\\', '/').StartsWith(textureRoot, StringComparison.OrdinalIgnoreCase))) throw new Exception("Export included a texture outside the DDX1 Texture directory.");
+            if (persisted.Textures.Select(entry => entry.DdsFile).Distinct(StringComparer.OrdinalIgnoreCase).Count() != persisted.Textures.Count) throw new Exception("Exported DDS filenames are not unique.");
+
+            foreach (ModelTextureSetEntry entry in persisted.Textures)
+            {
+                if (entry.DdsFile != Path.GetFileName(entry.DdsFile) || entry.DdsFile is "." or ".." || !entry.DdsFile.EndsWith(".dds", StringComparison.OrdinalIgnoreCase)) throw new Exception($"Unsafe DDS filename '{entry.DdsFile}'.");
+                string ddsPath = Path.Combine(destination, entry.DdsFile);
+                if (!File.Exists(ddsPath)) throw new Exception($"Missing exported DDS '{entry.DdsFile}'.");
+                byte[] dds = File.ReadAllBytes(ddsPath);
+                if (dds.Length < 4 || !dds.AsSpan(0, 4).SequenceEqual("DDS "u8)) throw new Exception($"Invalid DDS signature for '{entry.DdsFile}'.");
+                if (BinaryPrimitives.ReadUInt32LittleEndian(dds.AsSpan(28, 4)) != 1) throw new Exception($"Exported DDS '{entry.DdsFile}' is not root-mip-only.");
+                if (entry.Width <= 0 || entry.Height <= 0 || entry.MipCount <= 0) throw new Exception($"Invalid DDS metadata for '{entry.DdsFile}'.");
+                AssetEntry source = library.All.Single(asset => asset.Path.Equals(entry.LogicalPath, StringComparison.OrdinalIgnoreCase));
+                SubAssetEntry image = source.SubEntries!.Single(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase));
+                byte[] imageBytes = AssetExtractor.GetSubBlob(image, source, image.ContentDirectory);
+                int sourceMipCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(imageBytes.AsSpan(4, 4)));
+                if (entry.MipCount != sourceMipCount) throw new Exception($"Manifest mip count for '{entry.LogicalPath}' is {entry.MipCount}, source declares {sourceMipCount}.");
+                string sha256 = Convert.ToHexString(SHA256.HashData(dds)).ToLowerInvariant();
+                if (!entry.OriginalSha256.Equals(sha256, StringComparison.OrdinalIgnoreCase)) throw new Exception($"SHA-256 mismatch for '{entry.DdsFile}'.");
+            }
+
+            ModelTextureSetEntry baseColor = persisted.Textures.Single(entry => entry.LogicalPath.EndsWith("/PL0000_DDX1_Cloth1_BaseCol_AAA3", StringComparison.OrdinalIgnoreCase));
+            byte[] rootDds = File.ReadAllBytes(Path.Combine(destination, baseColor.DdsFile));
+            if (baseColor.Width != 4096 || baseColor.Height != 4096 || baseColor.MipCount != 13 || BinaryPrimitives.ReadUInt32LittleEndian(rootDds.AsSpan(128, 4)) != 78 || BinaryPrimitives.ReadUInt32LittleEndian(rootDds.AsSpan(28, 4)) != 1)
+                throw new Exception("Real DDX1 BaseCol root-mip export metadata is incorrect.");
+            AssetEntry baseColorAsset = library.All.Single(entry => entry.Path.Equals(baseColor.LogicalPath, StringComparison.OrdinalIgnoreCase));
+            string baseColorContentDirectory = baseColorAsset.SubEntries!.First(entry => entry.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase)).ContentDirectory;
+            TexturePackageDdsData fullBaseColor = TexturePackageDds.Extract(baseColorAsset, baseColorContentDirectory);
+            if (fullBaseColor.TotalSize != 22_369_796 || fullBaseColor.DdsBytes.Length != 22_369_796 || fullBaseColor.MipCount != 13 || fullBaseColor.HeaderLength != 148)
+                throw new Exception("Real DDX1 BaseCol full DDS logical layout is incorrect.");
+
+            ModelTextureSetEntry smallest = persisted.Textures
+                .Where(entry => entry.DxgiFormat is 71 or 72 or 77 or 78 or 80 or 83)
+                .OrderBy(entry => new FileInfo(Path.Combine(destination, entry.DdsFile)).Length)
+                .First();
+            string smallestPath = Path.Combine(destination, smallest.DdsFile);
+            File.WriteAllBytes(smallestPath, MakeVisiblePixelEdit(File.ReadAllBytes(smallestPath)));
+            ModelTextureImportPlan realPlan = ModelTextureSetService.PlanImport(destination, library.All);
+            if (realPlan.Changes.Count != 1 || realPlan.Changes[0].ParentEntry.StringAssetID != smallest.AssetId)
+                throw new Exception("Real smallest-candidate smoke did not select exactly the edited texture.");
+            AssetEntry smallestAsset = library.All.Single(asset => asset.StringAssetID.Equals(smallest.AssetId, StringComparison.OrdinalIgnoreCase));
+            string smallestContent = smallestAsset.SubEntries!.First(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase)).ContentDirectory;
+            TexturePackageImportResult generatedMips = TexturePackageDds.SplitForImport(realPlan.Changes[0].ModifiedData);
+            TexturePackageImportResult sourceMips = TexturePackageDds.SplitForImport(TexturePackageDds.Extract(smallestAsset, smallestContent).DdsBytes);
+            if (generatedMips.MipPayloads.Count != smallest.MipCount ||
+                !generatedMips.MipPayloads.Select(mip => mip.Length).SequenceEqual(sourceMips.MipPayloads.Select(mip => mip.Length)))
+                throw new Exception("Real smallest-candidate smoke generated an incompatible mip layout.");
+        }
+        finally
+        {
+            if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
+            string? parent = Path.GetDirectoryName(destination);
+            string prefix = Path.GetFileName(destination) + ".ronin-";
+            if (parent is not null && Directory.Exists(parent))
+                foreach (string temp in Directory.EnumerateDirectories(parent, prefix + "*.tmp")) Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    private static void TestTransactionalPreflight(AssetEntry model, IEnumerable<AssetEntry> assets, string destination)
+    {
+        string parent = Path.GetDirectoryName(destination)!;
+        string prefix = Path.GetFileName(destination) + ".ronin-";
+        var malformed = Entry(Path.GetDirectoryName(model.Path)!.Replace('\\', '/') + "/Texture/" + model.FileName + "_zzzz_invalid", AssetType.Texture, "00000009-00000000-00000000-00000000");
+        bool temporaryWasCreated = false;
+        using var watcher = new FileSystemWatcher(parent) { IncludeSubdirectories = false, EnableRaisingEvents = true, NotifyFilter = NotifyFilters.DirectoryName };
+        watcher.Created += (_, args) => { if (Path.GetFileName(args.FullPath).StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) temporaryWasCreated = true; };
+        try
+        {
+            try
+            {
+                ModelTextureSetService.Export(model, assets.Append(malformed), destination);
+                throw new Exception("Malformed texture candidate unexpectedly exported.");
+            }
+            catch (InvalidDataException) { }
+            watcher.WaitForChanged(WatcherChangeTypes.All, 100);
+            if (Directory.Exists(destination)) throw new Exception("Failed texture-set export left its destination directory behind.");
+            if (Directory.EnumerateDirectories(parent, prefix + "*.tmp").Any()) throw new Exception("Failed texture-set export leaked a temporary directory.");
+            if (temporaryWasCreated) throw new Exception("Failed texture-set export created a temporary directory before all candidates passed preflight.");
+        }
+        finally
+        {
+            if (Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
+            foreach (string temp in Directory.EnumerateDirectories(parent, prefix + "*.tmp")) Directory.Delete(temp, recursive: true);
+        }
+    }
+
+    private static AssetEntry Entry(string path, AssetType type, string id) => new() { Path = path, Type = type, AssetID = UUIDParser.Parse(id) };
+}

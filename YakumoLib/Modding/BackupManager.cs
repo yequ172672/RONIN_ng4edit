@@ -1,203 +1,184 @@
-using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+using System.Security.Cryptography;
 
-namespace YakumoLib.Modding
+namespace YakumoLib.Modding;
+
+/// <summary>Creates and restores SHA-256-verified snapshots under a configured game root.</summary>
+public sealed class BackupManager
 {
-    /// <summary>
-    /// Manages timestamped backups of game files before any read/write operation.
-    /// All game-directory file operations must route through BackupManager.
-    /// </summary>
-    public sealed class BackupManager
-    {
-        private readonly string _gameRoot;
-        private readonly string _backupRoot;
-        private readonly HashSet<string> _backedUpFiles = new(StringComparer.OrdinalIgnoreCase);
+    private readonly string _gameRoot;
+    private readonly string _backupRoot;
+    private readonly HashSet<string> _backedUpFiles = new(StringComparer.OrdinalIgnoreCase);
 
-        public BackupManager(string gameRoot)
+    public BackupManager(string gameRoot)
+        : this(gameRoot, snapshotPath: null)
+    {
+    }
+
+    private BackupManager(string gameRoot, string? snapshotPath)
+    {
+        if (string.IsNullOrWhiteSpace(gameRoot))
+            throw new ArgumentException("Game root is required.", nameof(gameRoot));
+
+        _gameRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gameRoot));
+        if (!Directory.Exists(_gameRoot))
+            throw new DirectoryNotFoundException($"Game root does not exist: '{_gameRoot}'.");
+
+        string backupsDirectory = Path.Combine(_gameRoot, "Backups");
+        if (snapshotPath is null)
         {
-            _gameRoot = Path.GetFullPath(gameRoot);
-            _backupRoot = Path.Combine(_gameRoot, "Backups", DateTime.Now.ToString("yyyy-MM-dd_HHmmss"));
+            string timestamp = DateTime.UtcNow.ToString("yyyy-MM-dd_HHmmss_fff");
+            _backupRoot = Path.Combine(backupsDirectory, timestamp);
             Directory.CreateDirectory(_backupRoot);
         }
-
-        /// <summary>
-        /// The root backup directory for this session.
-        /// </summary>
-        public string BackupRoot => _backupRoot;
-
-        /// <summary>
-        /// The game root directory.
-        /// </summary>
-        public string GameRoot => _gameRoot;
-
-        /// <summary>
-        /// Ensure the file at the given path (relative to game root or absolute) is backed up.
-        /// Skips if an identical backup already exists.
-        /// Returns the backup file path, or null if file doesn't exist.
-        /// </summary>
-        public string? Backup(string relativeOrAbsolutePath)
+        else
         {
-            string fullPath = ResolvePath(relativeOrAbsolutePath);
+            _backupRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(snapshotPath));
+            EnsureWithinRoot(backupsDirectory, _backupRoot, "Snapshot");
+            if (!Directory.Exists(_backupRoot))
+                throw new DirectoryNotFoundException($"Backup snapshot does not exist: '{_backupRoot}'.");
+        }
+    }
 
-            if (!File.Exists(fullPath))
-                return null;
+    public string BackupRoot => _backupRoot;
+    public string GameRoot => _gameRoot;
 
-            string relative = GetRelativePath(fullPath);
-            string backupPath = Path.Combine(_backupRoot, relative);
+    public static BackupManager OpenSnapshot(string gameRoot, string snapshotPath) => new(gameRoot, snapshotPath);
 
-            // Skip if we already backed up this exact file this session
+    public string? Backup(string relativeOrAbsolutePath)
+    {
+        string fullPath = ResolveGamePath(relativeOrAbsolutePath);
+        if (!File.Exists(fullPath))
+            return null;
+
+        string relative = Path.GetRelativePath(_gameRoot, fullPath);
+        string backupPath = Path.GetFullPath(Path.Combine(_backupRoot, relative));
+        EnsureWithinRoot(_backupRoot, backupPath, "Backup destination");
+
+        lock (_backedUpFiles)
+        {
             if (_backedUpFiles.Contains(fullPath))
+            {
+                VerifyEqual(fullPath, backupPath);
                 return backupPath;
-
-            // Skip identical backup (already exists and matches)
-            if (File.Exists(backupPath) && FilesAreIdentical(fullPath, backupPath))
-                return backupPath;
+            }
 
             Directory.CreateDirectory(Path.GetDirectoryName(backupPath)!);
             File.Copy(fullPath, backupPath, overwrite: true);
-
-            lock (_backedUpFiles)
-            {
-                _backedUpFiles.Add(fullPath);
-            }
-
-            return backupPath;
+            VerifyEqual(fullPath, backupPath);
+            _backedUpFiles.Add(fullPath);
         }
 
-        /// <summary>
-        /// Backup all files in a directory recursively.
-        /// </summary>
-        public int BackupDirectory(string relativeOrAbsolutePath)
+        return backupPath;
+    }
+
+    public int BackupDirectory(string relativeOrAbsolutePath)
+    {
+        string fullPath = ResolveGamePath(relativeOrAbsolutePath);
+        if (!Directory.Exists(fullPath))
+            return 0;
+
+        int count = 0;
+        foreach (string file in Directory.EnumerateFiles(fullPath, "*", SearchOption.AllDirectories))
         {
-            string fullPath = ResolvePath(relativeOrAbsolutePath);
-            if (!Directory.Exists(fullPath))
-                return 0;
-
-            int count = 0;
-            foreach (var file in Directory.EnumerateFiles(fullPath, "*", SearchOption.AllDirectories))
-            {
-                if (Backup(file) != null)
-                    count++;
-            }
-            return count;
-        }
-
-        /// <summary>
-        /// Restore a single file from backup.
-        /// </summary>
-        public bool Restore(string relativeOrAbsolutePath)
-        {
-            string fullPath = ResolvePath(relativeOrAbsolutePath);
-            string relative = GetRelativePath(fullPath);
-            string backupPath = Path.Combine(_backupRoot, relative);
-
-            if (!File.Exists(backupPath))
-                return false;
-
-            Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-            File.Copy(backupPath, fullPath, overwrite: true);
-            return true;
-        }
-
-        /// <summary>
-        /// Restore all files from the most recent backup snapshot.
-        /// </summary>
-        public int RestoreAll()
-        {
-            int count = 0;
-            foreach (var backupFile in Directory.EnumerateFiles(_backupRoot, "*", SearchOption.AllDirectories))
-            {
-                string relative = Path.GetRelativePath(_backupRoot, backupFile);
-                string originalPath = Path.Combine(_gameRoot, relative);
-
-                Directory.CreateDirectory(Path.GetDirectoryName(originalPath)!);
-                File.Copy(backupFile, originalPath, overwrite: true);
+            if (IsWithinRoot(_backupRoot, file))
+                continue;
+            if (Backup(file) is not null)
                 count++;
-            }
-            return count;
         }
+        return count;
+    }
 
-        /// <summary>
-        /// List all backed-up files.
-        /// </summary>
-        public IReadOnlyList<string> GetBackedUpFiles()
+    public bool Restore(string relativeOrAbsolutePath)
+    {
+        string fullPath = ResolveGamePath(relativeOrAbsolutePath);
+        string relative = Path.GetRelativePath(_gameRoot, fullPath);
+        string backupPath = Path.GetFullPath(Path.Combine(_backupRoot, relative));
+        EnsureWithinRoot(_backupRoot, backupPath, "Backup source");
+        if (!File.Exists(backupPath))
+            return false;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+        string temporaryPath = fullPath + ".restore-" + Guid.NewGuid().ToString("N") + ".tmp";
+        try
         {
-            if (!Directory.Exists(_backupRoot))
-                return Array.Empty<string>();
-
-            return Directory.EnumerateFiles(_backupRoot, "*", SearchOption.AllDirectories)
-                .Select(f => Path.GetRelativePath(_backupRoot, f))
-                .ToList();
-        }
-
-        /// <summary>
-        /// Get the latest backup timestamp directory name.
-        /// </summary>
-        public static string? GetLatestBackupPath(string gameRoot)
-        {
-            var backupsDir = Path.Combine(gameRoot, "Backups");
-            if (!Directory.Exists(backupsDir))
-                return null;
-
-            return Directory.EnumerateDirectories(backupsDir)
-                .OrderByDescending(d => d)
-                .FirstOrDefault();
-        }
-
-        private string ResolvePath(string path)
-        {
-            if (Path.IsPathRooted(path))
-                return Path.GetFullPath(path);
-            return Path.GetFullPath(Path.Combine(_gameRoot, path));
-        }
-
-        private string GetRelativePath(string fullPath)
-        {
-            string fullGameRoot = Path.GetFullPath(_gameRoot) + Path.DirectorySeparatorChar;
-            if (fullPath.StartsWith(fullGameRoot, StringComparison.OrdinalIgnoreCase))
-                return fullPath[fullGameRoot.Length..];
-            return Path.GetFileName(fullPath);
-        }
-
-        private static bool FilesAreIdentical(string path1, string path2)
-        {
-            var info1 = new FileInfo(path1);
-            var info2 = new FileInfo(path2);
-
-            if (info1.Length != info2.Length)
-                return false;
-
-            // Quick check using last write time
-            if (info1.LastWriteTimeUtc == info2.LastWriteTimeUtc)
-                return true;
-
-            // Full byte comparison
-            using var fs1 = new FileStream(path1, FileMode.Open, FileAccess.Read, FileShare.Read);
-            using var fs2 = new FileStream(path2, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-            int bufferSize = 8192;
-            byte[] buffer1 = new byte[bufferSize];
-            byte[] buffer2 = new byte[bufferSize];
-
-            int bytesRead1, bytesRead2;
-            while ((bytesRead1 = fs1.Read(buffer1, 0, bufferSize)) > 0)
-            {
-                bytesRead2 = fs2.Read(buffer2, 0, bufferSize);
-                if (bytesRead1 != bytesRead2)
-                    return false;
-
-                for (int i = 0; i < bytesRead1; i++)
-                {
-                    if (buffer1[i] != buffer2[i])
-                        return false;
-                }
-            }
-
+            File.Copy(backupPath, temporaryPath, overwrite: false);
+            VerifyEqual(backupPath, temporaryPath);
+            File.Move(temporaryPath, fullPath, overwrite: true);
+            VerifyEqual(backupPath, fullPath);
             return true;
         }
+        finally
+        {
+            File.Delete(temporaryPath);
+        }
+    }
+
+    public int RestoreAll()
+    {
+        int count = 0;
+        foreach (string backupFile in Directory.EnumerateFiles(_backupRoot, "*", SearchOption.AllDirectories))
+        {
+            string relative = Path.GetRelativePath(_backupRoot, backupFile);
+            if (Restore(relative))
+                count++;
+        }
+        return count;
+    }
+
+    public IReadOnlyList<string> GetBackedUpFiles() => Directory
+        .EnumerateFiles(_backupRoot, "*", SearchOption.AllDirectories)
+        .Select(file => Path.GetRelativePath(_backupRoot, file))
+        .ToList();
+
+    public static string? GetLatestBackupPath(string gameRoot)
+    {
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(gameRoot));
+        string backupsDirectory = Path.Combine(root, "Backups");
+        if (!Directory.Exists(backupsDirectory))
+            return null;
+
+        return Directory.EnumerateDirectories(backupsDirectory)
+            .OrderByDescending(path => path, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault();
+    }
+
+    public static string ComputeSha256(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexString(SHA256.HashData(stream));
+    }
+
+    private string ResolveGamePath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            throw new ArgumentException("A game file path is required.", nameof(path));
+
+        string fullPath = Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(_gameRoot, path));
+        EnsureWithinRoot(_gameRoot, fullPath, "Game path");
+        return fullPath;
+    }
+
+    private static void VerifyEqual(string source, string copy)
+    {
+        if (!File.Exists(copy) || !CryptographicOperations.FixedTimeEquals(
+                Convert.FromHexString(ComputeSha256(source)),
+                Convert.FromHexString(ComputeSha256(copy))))
+        {
+            throw new IOException($"SHA-256 verification failed for backup '{copy}'.");
+        }
+    }
+
+    private static bool IsWithinRoot(string root, string candidate)
+    {
+        string normalizedRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        string normalizedCandidate = Path.GetFullPath(candidate);
+        return string.Equals(normalizedRoot, normalizedCandidate, StringComparison.OrdinalIgnoreCase) ||
+               normalizedCandidate.StartsWith(normalizedRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void EnsureWithinRoot(string root, string candidate, string label)
+    {
+        if (!IsWithinRoot(root, candidate))
+            throw new UnauthorizedAccessException($"{label} is outside the configured root: '{candidate}'.");
     }
 }

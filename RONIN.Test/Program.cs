@@ -5,6 +5,90 @@ using YakumoLib.Database;
 using YakumoLib.Formats;
 using YakumoLib.Modding;
 
+if (args.Contains("--model-texture-set-tests", StringComparer.OrdinalIgnoreCase))
+{
+    ModelTextureSetTests.Run();
+    return;
+}
+
+if (args.Length == 4 && args[0].Equals("--export-model-texture-set", StringComparison.OrdinalIgnoreCase))
+{
+    TextureSetCli.ExportResult result = TextureSetCli.Export(args[1], args[2], args[3]);
+    Console.WriteLine($"Exported {result.TextureCount} root-mip textures for {result.ModelPath} to {result.Destination}");
+    return;
+}
+
+if (args.Length == 4 && args[0].Equals("--export-model-texture-set-png", StringComparison.OrdinalIgnoreCase))
+{
+    TextureSetCli.ExportResult result = TextureSetCli.ExportPng(args[1], args[2], args[3]);
+    Console.WriteLine($"Exported {result.TextureCount} root-mip PNG textures for {result.ModelPath} to {result.Destination}");
+    return;
+}
+
+if (args.Length == 3 && args[0].Equals("--import-model-texture-set", StringComparison.OrdinalIgnoreCase))
+{
+    TextureSetCli.ImportResult result = TextureSetCli.Import(args[1], args[2]);
+    Console.WriteLine(result.PatchId is null
+        ? $"No texture changes ({result.UnchangedCount} unchanged); no patch generated."
+        : $"Generated @{result.PatchId}.csv/.dat ({result.ChangedCount} changed, {result.UnchangedCount} unchanged)");
+    return;
+}
+
+if (args.Length == 5 && args[0].Equals("--generate-subasset-patch", StringComparison.OrdinalIgnoreCase))
+{
+    string assetsDirectory = Path.GetFullPath(args[1]);
+    string assetQuery = args[2];
+    string subFileName = args[3];
+    string replacementPath = Path.GetFullPath(args[4]);
+    AssetLibrary patchLibrary = AssetLibrary.Load(assetsDirectory);
+    AssetEntry[] exactMatches = patchLibrary.All.Where(entry =>
+        entry.Path.Equals(assetQuery, StringComparison.OrdinalIgnoreCase)).ToArray();
+    AssetEntry[] matches = exactMatches.Length > 0 ? exactMatches : patchLibrary.All.Where(entry =>
+        entry.Path.Contains(assetQuery, StringComparison.OrdinalIgnoreCase)).ToArray();
+    if (matches.Length != 1)
+        throw new InvalidOperationException($"Asset query '{assetQuery}' matched {matches.Length} entries; use a unique path fragment.{Environment.NewLine}" +
+                                            string.Join(Environment.NewLine, matches.Select(entry => entry.Path)));
+    AssetEntry parent = matches[0];
+    SubAssetEntry sub = parent.SubEntries?.SingleOrDefault(entry =>
+        entry.FileName.Equals(subFileName, StringComparison.OrdinalIgnoreCase))
+        ?? throw new InvalidOperationException($"Asset '{parent.Path}' has no unique subfile '{subFileName}'.{Environment.NewLine}" +
+                                               string.Join(Environment.NewLine, parent.SubEntries?.Select(entry => entry.FileName) ?? []));
+    byte[] replacement = File.ReadAllBytes(replacementPath);
+    _ = MDLParserExtended.Parse(replacement);
+    byte[] originalSubData = AssetExtractor.GetSubBlob(sub, parent, sub.ContentDirectory);
+    string generatedPatchId = PatchGenerator.GeneratePatch(assetsDirectory,
+    [
+        new ModifiedAssetEntry
+        {
+            ParentEntry = parent,
+            SubEntry = sub,
+            ModifiedData = replacement,
+            OriginalData = originalSubData,
+            Compress = false
+        }
+    ], compressData: false);
+    Console.WriteLine($"Generated @{generatedPatchId}.csv/.dat for {parent.Path}/{sub.FileName}");
+    return;
+}
+
+if (args.Length == 5 && args[0].Equals("--verify-subasset-replacement", StringComparison.OrdinalIgnoreCase))
+{
+    string assetsDirectory = Path.GetFullPath(args[1]);
+    string logicalAssetPath = args[2];
+    string subFileName = args[3];
+    string expectedPath = Path.GetFullPath(args[4]);
+    AssetLibrary verifyLibrary = AssetLibrary.Load(assetsDirectory);
+    AssetEntry parent = verifyLibrary.All.Single(entry => entry.Path.Equals(logicalAssetPath, StringComparison.OrdinalIgnoreCase));
+    SubAssetEntry sub = parent.SubEntries?.Single(entry => entry.FileName.Equals(subFileName, StringComparison.OrdinalIgnoreCase))
+        ?? throw new InvalidOperationException($"Asset '{logicalAssetPath}' has no subfile '{subFileName}'.");
+    byte[] actual = AssetExtractor.GetSubBlob(sub, parent, sub.ContentDirectory);
+    byte[] expected = File.ReadAllBytes(expectedPath);
+    if (!actual.AsSpan().SequenceEqual(expected))
+        throw new InvalidDataException($"Installed {parent.SourceArchive}/{sub.FileName} differs from '{expectedPath}'.");
+    Console.WriteLine($"Verified {parent.SourceArchive}/{parent.StoragePath}/{sub.FileName} ({actual.Length} bytes)");
+    return;
+}
+
 string assetPath = args.Length > 0 ? args[0] : "D:\\BaiduNetdiskDownload\\NINJA GAIDEN 4 The Two Masters\\Assets";
 string gameRoot = Path.GetDirectoryName(assetPath.TrimEnd('\\', '/'))!;
 string outDir = "D:\\code\\Game\\RONIN_ng4edit-main\\ExtractedModels";
@@ -138,8 +222,25 @@ var modified = new ModifiedAssetEntry
     OriginalData = original,
     Compress = false
 };
-string patchId = PatchGenerator.GeneratePatch(assetPath, [modified], false);
-Console.WriteLine($"OK (patch: @{patchId}.csv/.dat)");
+string patchFixture = Path.Combine(Path.GetTempPath(), $"ronin-patch-{Guid.NewGuid():N}");
+Directory.CreateDirectory(patchFixture);
+File.WriteAllText(Path.Combine(patchFixture, "@patch_image0.csv"), "header,2,0," + Environment.NewLine);
+File.WriteAllBytes(Path.Combine(patchFixture, "@patch_image0.dat"), []);
+string patchId;
+try
+{
+    patchId = PatchGenerator.GeneratePatch(patchFixture, [modified], false);
+    if (patchId != "patch_image0") throw new InvalidOperationException($"Expected patch_image0, got {patchId}.");
+    string[] patchLines = File.ReadAllLines(Path.Combine(patchFixture, "@patch_image0.csv"));
+    if (patchLines[0] != "header,2,0," || patchLines.Length != 2 ||
+        string.IsNullOrWhiteSpace(model.Entry.StoragePath) || !patchLines[1].StartsWith(model.Entry.StoragePath + ",", StringComparison.Ordinal))
+        throw new InvalidDataException("Generated patch does not use the game-native header and UUID storage path.");
+}
+finally
+{
+    Directory.Delete(patchFixture, recursive: true);
+}
+Console.WriteLine($"OK (patch archive: @{patchId}.csv/.dat)");
 
 // ═══════════ SUMMARY ═══════════
 Console.WriteLine($"\n══════════ E2E TEST RESULTS ══════════");

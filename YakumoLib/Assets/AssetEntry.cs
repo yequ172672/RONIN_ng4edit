@@ -15,6 +15,9 @@ namespace YakumoLib.Assets
         public long? CompressedSize { get; init; }
         public long? Offset { get; init; }
         public string? SourceArchive { get; init; }
+        public string? StoragePath { get; init; }
+        public string? CsvUnknown { get; init; }
+        public string? CsvMetadata { get; init; }
 
         public bool? Pruned { get; init; }
         public string? ContentDirectory { get; init; }

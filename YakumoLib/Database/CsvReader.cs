@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -21,13 +20,12 @@ namespace YakumoLib.Database
         public void LoadAssetInfo(
             Dictionary<UUID, AssetEntry> assetsById,
         string assetsDirectory,
-        IProgress<(string fileName, int done, int total, int size)>? progress = null)
+        IProgress<(string fileName, int done, int total, long size)>? progress = null)
         {
             var csvFiles = Directory.EnumerateFiles(assetsDirectory, "*.csv", SearchOption.TopDirectoryOnly).ToArray();
-            var perFileResults = new ConcurrentBag<Dictionary<UUID, CsvAssetLine>>();
 
-            var baseFiles = csvFiles.Where(f => !IsPatchFile(f)).ToArray();
-            var patchFiles = csvFiles.Where(f => IsPatchFile(f)).ToArray();
+            var baseFiles = OrderCsvFiles(csvFiles.Where(f => !IsPatchFile(f)), "@image");
+            var patchFiles = OrderCsvFiles(csvFiles.Where(IsPatchFile), "@patch_image");
 
 
 
@@ -58,15 +56,16 @@ namespace YakumoLib.Database
 
         private List<Dictionary<UUID, CsvAssetLine>> ParseCSVThreaded(
             string[] files,
-            IProgress<(string, int, int, int)>? progress,
+            IProgress<(string, int, int, long)>? progress,
             int totalCount,
             int doneOffset)
         {
-            var results = new ConcurrentBag<Dictionary<UUID, CsvAssetLine>>();
+            var results = new Dictionary<UUID, CsvAssetLine>[files.Length];
             int filesDone = doneOffset;
 
-            Parallel.ForEach(files, file =>
+            Parallel.For(0, files.Length, index =>
             {
+                string file = files[index];
                 var fileName = Path.GetFileName(file);
                 var localResults = new Dictionary<UUID, CsvAssetLine>();
 
@@ -110,16 +109,58 @@ namespace YakumoLib.Database
                 }
 
 
-                results.Add(localResults);
+                results[index] = localResults;
 
                 int done = Interlocked.Increment(ref filesDone);
                 FileInfo fInfo = new FileInfo(file);
-                progress?.Report((fileName, done, totalCount, (int)fInfo.Length)); // TOOD: Length should be Long
+                progress?.Report((fileName, done, totalCount, fInfo.Length));
 
             });
 
             return results.ToList();
         }
+
+        private static string[] OrderCsvFiles(IEnumerable<string> files, string numericPrefix)
+        {
+            return files
+                .Select(file => (File: file, Key: CreateSortKey(file, numericPrefix)))
+                .OrderBy(item => item.Key.Group)
+                .ThenBy(item => item.Key.DigitLength)
+                .ThenBy(item => item.Key.NormalizedDigits, StringComparer.Ordinal)
+                .ThenBy(item => item.Key.FileName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(item => item.Key.FileName, StringComparer.Ordinal)
+                .Select(item => item.File)
+                .ToArray();
+        }
+
+        private static CsvFileSortKey CreateSortKey(string filePath, string numericPrefix)
+        {
+            string fileName = Path.GetFileName(filePath);
+            string stem = Path.GetFileNameWithoutExtension(fileName);
+            ReadOnlySpan<char> suffix = stem.AsSpan();
+
+            if (suffix.StartsWith(numericPrefix, StringComparison.Ordinal))
+            {
+                suffix = suffix[numericPrefix.Length..];
+                bool isPureNumber = !suffix.IsEmpty;
+                foreach (char character in suffix)
+                    isPureNumber &= char.IsAsciiDigit(character);
+
+                if (isPureNumber)
+                {
+                    int firstSignificantDigit = 0;
+                    while (firstSignificantDigit < suffix.Length - 1 && suffix[firstSignificantDigit] == '0')
+                        firstSignificantDigit++;
+
+                    string normalizedDigits = suffix[firstSignificantDigit..].ToString();
+                    return new CsvFileSortKey(0, normalizedDigits.Length, normalizedDigits, fileName);
+                }
+            }
+
+            return new CsvFileSortKey(1, 0, string.Empty, fileName);
+        }
+
+        private readonly record struct CsvFileSortKey(int Group, int DigitLength, string NormalizedDigits, string FileName);
 
         private static void MergeInto(
             Dictionary<UUID, AssetEntry> assetsById,
@@ -131,7 +172,12 @@ namespace YakumoLib.Database
                 {
                     if (assetsById.TryGetValue(id, out var entry))
                     {
-                        assetsById[id] = entry with { Size = csvLine.Size, CompressedSize = csvLine.CompressedSize, SubEntries = csvLine.SubEntries, Offset = csvLine.Offset, SourceArchive = csvLine.SourceArchive, Pruned = false };
+                        assetsById[id] = entry with
+                        {
+                            Size = csvLine.Size, CompressedSize = csvLine.CompressedSize, SubEntries = csvLine.SubEntries,
+                            Offset = csvLine.Offset, SourceArchive = csvLine.SourceArchive, StoragePath = csvLine.Path,
+                            CsvUnknown = csvLine.Unknown, CsvMetadata = csvLine.Metadata, Pruned = false
+                        };
                     }
                 }
             }
@@ -144,12 +190,12 @@ namespace YakumoLib.Database
 
             var path = NextToken(ref span, ',');
             long offset = long.Parse(NextToken(ref span, ','), CultureInfo.InvariantCulture);
-            NextToken(ref span, ','); // Unknown
+            string unknown = NextToken(ref span, ',').ToString();
 
             long size = long.Parse(NextToken(ref span, ','), CultureInfo.InvariantCulture);
             long compressedSize = long.Parse(NextToken(ref span, ','), CultureInfo.InvariantCulture);
             int fileCount = int.Parse(NextToken(ref span, ','), CultureInfo.InvariantCulture);
-            NextToken(ref span, ','); // Unknown
+            string metadata = NextToken(ref span, ',').ToString();
 
             var subEntries = new List<SubAssetEntry>(fileCount);
             var subBlob = span;
@@ -201,6 +247,8 @@ namespace YakumoLib.Database
                 Size = size,
                 CompressedSize = compressedSize,
                 FileCount = fileCount,
+                Unknown = unknown,
+                Metadata = metadata,
                 SubEntries = subEntries,
                 SourceArchive = Path.GetFileNameWithoutExtension(sourceArchive),
             };
