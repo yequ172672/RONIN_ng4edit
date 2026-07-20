@@ -1,0 +1,58 @@
+<Window x:Class="RONIN.Ng4ModMetadataDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="NG4MOD v2 Metadata"
+        Width="620" Height="500"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="120"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="110"/>
+            <ColumnDefinition Width="*"/>
+            <ColumnDefinition Width="Auto"/>
+        </Grid.ColumnDefinitions>
+
+        <TextBlock Grid.Row="0" Grid.ColumnSpan="3" Text="NG4MOD v2 package metadata"
+                   FontSize="16" FontWeight="Bold" Margin="0,0,0,14"/>
+
+        <TextBlock Grid.Row="1" Text="Mod ID" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" x:Name="ModIdTextBox" Margin="0,3"/>
+
+        <TextBlock Grid.Row="2" Text="Version" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="2" x:Name="VersionTextBox" Margin="0,3"/>
+
+        <TextBlock Grid.Row="3" Text="Name" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="3" Grid.Column="1" Grid.ColumnSpan="2" x:Name="NameTextBox" Margin="0,3"/>
+
+        <TextBlock Grid.Row="4" Text="Author" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="4" Grid.Column="1" Grid.ColumnSpan="2" x:Name="AuthorTextBox" Margin="0,3"/>
+
+        <TextBlock Grid.Row="5" Text="Description" VerticalAlignment="Top" Margin="0,7,0,0"/>
+        <TextBox Grid.Row="5" Grid.Column="1" Grid.ColumnSpan="2" x:Name="DescriptionTextBox"
+                 AcceptsReturn="True" TextWrapping="Wrap" VerticalScrollBarVisibility="Auto" Margin="0,3"/>
+
+        <TextBlock Grid.Row="6" Text="PNG cover" VerticalAlignment="Center"/>
+        <TextBox Grid.Row="6" Grid.Column="1" x:Name="CoverPathTextBox" Margin="0,3,8,3"/>
+        <Button Grid.Row="6" Grid.Column="2" Content="Browse..." Width="82" Click="BrowseCover_Click"/>
+
+        <TextBlock Grid.Row="7" Grid.Column="1" Grid.ColumnSpan="2" x:Name="ValidationText"
+                   Foreground="#E57373" TextWrapping="Wrap" Margin="0,8,0,0"/>
+
+        <StackPanel Grid.Row="9" Grid.ColumnSpan="3" Orientation="Horizontal" HorizontalAlignment="Right">
+            <Button Content="Package" Width="92" IsDefault="True" Margin="0,0,8,0" Click="Package_Click"/>
+            <Button Content="Cancel" Width="82" IsCancel="True"/>
+        </StackPanel>
+    </Grid>
+</Window>

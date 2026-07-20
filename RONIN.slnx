@@ -7,5 +7,6 @@
   <Project Path="DeflateSharp/DeflateSharp.vcxproj" Id="13b55469-a1c3-4921-a42f-3c88b36f254b" />
   <Project Path="RONIN.Test/RONIN.Test.csproj" Id="b1066b4e-d7b8-4ed1-a967-ce3f35042edb" />
   <Project Path="RONIN/RONIN.csproj" />
+  <Project Path="RoninNg4Host/RoninNg4Host.csproj" />
   <Project Path="YakumoLib/YakumoLib.csproj" Id="d93bece0-d1a6-4e03-8844-be5b02535889" />
 </Solution>

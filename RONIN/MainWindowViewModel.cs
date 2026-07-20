@@ -1,14 +1,19 @@
-﻿using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Win32;
 using RONIN.Browser;
+using RONIN.Formats;
 using RONIN.Preview;
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Security.Cryptography.Pkcs;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Windows;
 using System.Windows.Input;
 using YakumoLib.Assets;
 using YakumoLib.Database;
+using YakumoLib.Formats;
+using YakumoLib.Modding;
 
 namespace RONIN;
 
@@ -19,18 +24,45 @@ public sealed partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private int _progressCurrent;
     [ObservableProperty] private int _progressTotal = 1;
     [ObservableProperty] private string _activePath = "/";
-    [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasSelectedEntry))] private AssetEntry _selectedEntry = null;
-    [ObservableProperty][NotifyPropertyChangedFor(nameof(HasBackEntry))] private AssetEntry _previousEntry = null;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSelectedEntry))]
+    [NotifyPropertyChangedFor(nameof(IsModelModdingEnabled))]
+    private AssetEntry? _selectedEntry;
+    [ObservableProperty][NotifyPropertyChangedFor(nameof(HasBackEntry))] private AssetEntry? _previousEntry;
+
+    [ObservableProperty] private bool _isCompressEnabled;
+
+    /// <summary>Whether there are staged modifications waiting for patch generation.</summary>
+    public bool HasStagedChanges => ModifiedAssets.Count > 0;
+
+    /// <summary>Latest patch generation and backup details shown by the modding UI.</summary>
+    [ObservableProperty] private string _patchCommitStatus = "No patch generated in this session.";
+    [ObservableProperty] private string _backupSnapshotStatus = "No backup snapshot created in this session.";
+    [ObservableProperty] private string _verificationStatus = "Patch verification has not run.";
+
+    /// <summary>Path to the game's Assets directory. Configured via ModdingDialog or app settings.</summary>
+    [ObservableProperty] private string _gamePath = "";
+    [ObservableProperty] private string _ng4ModId = "";
+    [ObservableProperty] private string _ng4ModVersion = "1.0.0";
+    [ObservableProperty] private string _ng4ModName = "";
+    [ObservableProperty] private string _ng4ModAuthor = "";
+    [ObservableProperty] private string _ng4ModDescription = "";
+    [ObservableProperty] private string _ng4ModCoverPath = "";
 
     private readonly AssetPreviewRegistry _previewRegistry;
 
     [ObservableProperty] private object? _previewContent;
+    [ObservableProperty] private bool _isTextureModdingEnabled;
+
+    /// <summary>Tracks all assets modified during this session for patch generation.</summary>
+    public ObservableCollection<ModifiedAssetEntry> ModifiedAssets { get; } = new();
 
     public bool HasSelectedEntry => SelectedEntry is not null;
     public bool HasBackEntry => PreviousEntry is not null;
+    public bool IsModelModdingEnabled => SelectedEntry?.Type == AssetType.SkeletalMesh;
 
     public AssetLibrary? Library { get; private set; }
-    
+
     public ObservableCollection<FolderNodeViewModel> RootFolders { get; } = new();
     public ObservableCollection<AssetEntry> DebugAssets { get; } = new();
 
@@ -43,10 +75,8 @@ public sealed partial class MainWindowViewModel : ObservableObject
         _previewRegistry.Register(new FontPreviewProvider());
         _previewRegistry.Register(new ModelPreviewProvider());
         _previewRegistry.Register(new AssetTablePreviewProvider());
+        ModifiedAssets.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasStagedChanges));
     }
-
-
-
 
     [RelayCommand]
     private async Task LoadAssetDatabaseAsync()
@@ -73,15 +103,17 @@ public sealed partial class MainWindowViewModel : ObservableObject
         {
             var csvDirectory = Path.GetDirectoryName(dialog.FileName)!;
 
-            // Run the heavy work on a background thread — never block the UI thread
+            // Infer game path from the selected AssetDatabase.dat directory
+            GamePath = csvDirectory;
+
+            // Run the heavy work on a background thread
             Library = await Task.Run(() =>
-                AssetLibrary.Load(Path.GetDirectoryName(dialog.FileName), progress));
+                AssetLibrary.Load(csvDirectory, progress));
 
             var root = await Task.Run(() => FolderNode.BuildTree(Library.All));
 
             RootFolders.Clear();
             RootFolders.Add(new FolderNodeViewModel(root));
-
 
             StatusText = $"Done! Loaded {Library.Count} assets.";
             ProgressTotal = 1;
@@ -90,7 +122,6 @@ public sealed partial class MainWindowViewModel : ObservableObject
             DebugAssets.Clear();
             foreach (var asset in Library.All)
                 DebugAssets.Add(asset);
-
         }
         catch (Exception ex)
         {
@@ -108,6 +139,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
         if (provider is null)
         {
             PreviewContent = null;
+            IsTextureModdingEnabled = false;
             StatusText = $"Cannot preview {entry.Type}";
             ProgressCurrent = 0;
             return;
@@ -116,15 +148,14 @@ public sealed partial class MainWindowViewModel : ObservableObject
         try
         {
             PreviewContent = await provider.LoadPreviewAsync(entry);
-
-        }catch (Exception ex)
+            IsTextureModdingEnabled = entry.Type == AssetType.Texture;
+        }
+        catch (Exception ex)
         {
             PreviewContent = null;
+            IsTextureModdingEnabled = false;
             StatusText = $"Preview failed: {ex.Message}";
         }
-
-
-
     }
 
     public void SelectFile(AssetEntry entry)
@@ -134,17 +165,17 @@ public sealed partial class MainWindowViewModel : ObservableObject
         _ = ShowPreviewAsync(entry);
     }
 
-    private RelayCommand goBackToPreviousEntry;
+    private RelayCommand? goBackToPreviousEntry;
     public ICommand GoBackToPreviousEntry => goBackToPreviousEntry ??= new RelayCommand(PerformGoBackToPreviousEntry);
 
     private void PerformGoBackToPreviousEntry()
     {
-        SelectedEntry = PreviousEntry;
+        if (SelectedEntry is null) return;
         PreviousEntry = null;
         SelectFile(SelectedEntry);
     }
 
-    private RelayCommand exportRaw;
+    private RelayCommand? exportRaw;
     public ICommand ExportRaw => exportRaw ??= new RelayCommand(PerformExportRaw);
 
     private void PerformExportRaw()
@@ -152,21 +183,730 @@ public sealed partial class MainWindowViewModel : ObservableObject
         if (SelectedEntry == null)
         {
             StatusText = "No file is selected!";
+            return;
         }
-        else
+
+        var dialog = new OpenFolderDialog
         {
-            OpenFolderDialog dialog = new()
+            Title = "Select a folder to export to",
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            string folderPath = dialog.FolderName;
+            AssetExtractor.ExtractAll(SelectedEntry, folderPath);
+            StatusText = $"Exported {SelectedEntry.FileName} to {folderPath}";
+        }
+    }
+
+    // ========== Modding Commands ==========
+
+    [RelayCommand]
+    private async Task ExportAsFbxAsync()
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        // Find the first MDL subfile
+        var mdlSub = SelectedEntry.SubEntries?.FirstOrDefault(s =>
+            s.FileName.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase));
+        if (mdlSub is null)
+        {
+            StatusText = "No MDL file found in selected package.";
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusText = "Converting MDL to FBX...";
+
+            byte[] mdlData = await Task.Run(() =>
+                AssetExtractor.GetSubBlob(mdlSub, SelectedEntry, mdlSub.ContentDirectory));
+
+            var saveDialog = new SaveFileDialog
             {
-                Title = "Select a folder to export too",
+                Title = "Export Package as FBX",
+                FileName = $"{SelectedEntry.FileName}.fbx",
+                Filter = "FBX files (*.fbx)|*.fbx|All files (*.*)|*.*"
             };
 
-            if (dialog.ShowDialog() == true)
+            if (saveDialog.ShowDialog() == true)
             {
-                string folderPath = dialog.FolderName;
-                AssetExtractor.ExtractAll(SelectedEntry, folderPath);
+                var model = await Task.Run(() => MDLParserExtended.Parse(mdlData));
+                string fbx = await Task.Run(() => MdlToFbxConverter.ConvertToFbx(model));
+                await File.WriteAllTextAsync(saveDialog.FileName, fbx);
+                StatusText = $"Exported FBX: {saveDialog.FileName}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"FBX export failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void ExportSelectedSubfile(SubAssetEntry? subEntry)
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        if (subEntry is null)
+        {
+            StatusText = "No subfile selected.";
+            return;
+        }
+
+        try
+        {
+            byte[] data = AssetExtractor.GetSubBlob(subEntry, SelectedEntry, subEntry.ContentDirectory);
+
+            var saveDialog = new SaveFileDialog
+            {
+                Title = "Export Subfile",
+                FileName = subEntry.FileName,
+                Filter = "All files (*.*)|*.*"
+            };
+
+            if (saveDialog.ShowDialog() == true)
+            {
+                File.WriteAllBytes(saveDialog.FileName, data);
+                StatusText = $"Exported subfile: {subEntry.FileName}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Export failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExportSelectedSubfileAsFbxAsync(SubAssetEntry? subEntry)
+    {
+        if (SelectedEntry is null || subEntry is null)
+        {
+            StatusText = "No subfile selected.";
+            return;
+        }
+
+        if (!subEntry.FileName.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase))
+        {
+            StatusText = "Only MDL subfiles can be exported as FBX.";
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            StatusText = "Converting MDL to FBX...";
+
+            byte[] mdlData = await Task.Run(() => AssetExtractor.GetSubBlob(subEntry, SelectedEntry, subEntry.ContentDirectory));
+
+            var saveDialog = new SaveFileDialog
+            {
+                Title = "Export Subfile as FBX",
+                FileName = Path.ChangeExtension(subEntry.FileName, ".fbx"),
+                Filter = "FBX files (*.fbx)|*.fbx|All files (*.*)|*.*"
+            };
+
+            if (saveDialog.ShowDialog() == true)
+            {
+                var model = await Task.Run(() => YakumoLib.Formats.MDLParserExtended.Parse(mdlData));
+                string fbx = await Task.Run(() => YakumoLib.Formats.MdlToFbxConverter.ConvertToFbx(model));
+                await File.WriteAllTextAsync(saveDialog.FileName, fbx);
+                StatusText = $"Exported FBX: {saveDialog.FileName}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"FBX export failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void ReplaceSelectedSubfile(SubAssetEntry? subEntry)
+    {
+        if (SelectedEntry is null || subEntry is null)
+        {
+            StatusText = "No subfile selected.";
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = $"Select replacement for {subEntry.FileName}",
+            Filter = "All files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() != true)
+            return;
+
+        try
+        {
+            byte[] originalData = AssetExtractor.GetSubBlob(subEntry, SelectedEntry, subEntry.ContentDirectory);
+            byte[] newData = File.ReadAllBytes(dialog.FileName);
+
+            ModifiedAssets.Add(new ModifiedAssetEntry
+            {
+                ParentEntry = SelectedEntry,
+                SubEntry = subEntry,
+                ModifiedData = newData,
+                OriginalData = originalData,
+                Compress = IsCompressEnabled
+            });
+
+            StatusText = $"Marked {subEntry.FileName} for replacement ({newData.Length} bytes). Generate patch to apply.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Replace failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void ReplaceSelectedPackage()
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = $"Select replacement data for {SelectedEntry.FileName}",
+            Filter = "All files (*.*)|*.*|DAT files (*.dat)|*.dat|CSV files (*.csv)|*.csv"
+        };
+
+        if (dialog.ShowDialog() != true)
+            return;
+
+        try
+        {
+            byte[] newData = File.ReadAllBytes(dialog.FileName);
+
+            ModifiedAssets.Add(new ModifiedAssetEntry
+            {
+                ParentEntry = SelectedEntry,
+                SubEntry = null,
+                ModifiedData = newData,
+                OriginalData = [],
+                Compress = IsCompressEnabled
+            });
+
+            StatusText = $"Marked {SelectedEntry.FileName} for replacement ({newData.Length} bytes). Generate patch to apply.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Replace failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void ExportTextureAsDds()
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        if (SelectedEntry.Type != AssetType.Texture)
+        {
+            StatusText = "DDS export is only available for texture packages.";
+            return;
+        }
+
+        try
+        {
+            string archiveRootDirectory = SelectedEntry.ContentDirectory
+                ?? SelectedEntry.SubEntries?.FirstOrDefault()?.ContentDirectory
+                ?? throw new InvalidDataException($"Texture '{SelectedEntry.Path}' has no content directory.");
+
+            var texture = TexturePackageDds.Extract(SelectedEntry, archiveRootDirectory);
+            var saveDialog = new SaveFileDialog
+            {
+                Title = "Export Texture Package as DDS",
+                FileName = Path.ChangeExtension(SelectedEntry.FileName, ".dds"),
+                Filter = "DDS files (*.dds)|*.dds|All files (*.*)|*.*"
+            };
+
+            if (saveDialog.ShowDialog() == true)
+            {
+                File.WriteAllBytes(saveDialog.FileName, texture.DdsBytes);
+                StatusText = $"Exported DDS: {saveDialog.FileName}";
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"DDS export failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private void ReplaceSelectedPackageWithDds()
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        if (SelectedEntry.Type != AssetType.Texture)
+        {
+            StatusText = "DDS import is only available for texture packages.";
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select DDS file for texture package",
+            Filter = "DDS files (*.dds)|*.dds|All files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() != true)
+            return;
+
+        try
+        {
+            byte[] ddsBytes = File.ReadAllBytes(dialog.FileName);
+            TexturePackageDds.ValidateImportAgainstAsset(ddsBytes, SelectedEntry);
+
+            ModifiedAssets.Add(new ModifiedAssetEntry
+            {
+                ParentEntry = SelectedEntry,
+                SubEntry = null,
+                ModifiedData = ddsBytes,
+                OriginalData = Array.Empty<byte>(),
+                Compress = IsCompressEnabled
+            });
+
+            StatusText = $"Marked {SelectedEntry.FileName} for DDS replacement ({ddsBytes.Length} bytes). Generate patch to apply.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"DDS import failed: {ex.Message}";
+        }
+    }
+
+    [RelayCommand]
+    private async Task ReplaceWithFbxAsync()
+    {
+        if (SelectedEntry is null)
+        {
+            StatusText = "No package selected.";
+            return;
+        }
+
+        var dialog = new OpenFileDialog
+        {
+            Title = "Select FBX file for conversion",
+            Filter = "FBX files (*.fbx)|*.fbx|All files (*.*)|*.*"
+        };
+
+        if (dialog.ShowDialog() != true)
+            return;
+
+        try
+        {
+            IsBusy = true;
+            StatusText = "Converting FBX to MDL...";
+
+            // Find the modeldata.mdl subfile
+            var modelDataSub = SelectedEntry.SubEntries?
+                .FirstOrDefault(s => s.FileName.Equals("modeldata.mdl", StringComparison.OrdinalIgnoreCase));
+
+            if (modelDataSub is null)
+            {
+                StatusText = "No modeldata.mdl found in selected package.";
+                return;
             }
 
+            // Get original MDL data
+            byte[] originalMdl = await Task.Run(() =>
+                AssetExtractor.GetSubBlob(modelDataSub, SelectedEntry, modelDataSub.ContentDirectory));
 
+            // Convert FBX to MDL
+            byte[] newMdl = await Task.Run(() => YakumoLib.Formats.FbxToMdlConverter.Convert(dialog.FileName, originalMdl));
+
+            ModifiedAssets.Add(new ModifiedAssetEntry
+            {
+                ParentEntry = SelectedEntry,
+                SubEntry = modelDataSub,
+                ModifiedData = newMdl,
+                OriginalData = originalMdl,
+                Compress = IsCompressEnabled
+            });
+
+            StatusText = $"Converted FBX to MDL ({newMdl.Length} bytes). Generate patch to apply.";
         }
+        catch (Exception ex)
+        {
+            StatusText = $"FBX conversion failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void GeneratePatch()
+    {
+        if (ModifiedAssets.Count == 0)
+        {
+            StatusText = "No modified assets to patch. Replace a subfile or package first.";
+            return;
+        }
+
+        if (string.IsNullOrEmpty(GamePath) || !Directory.Exists(GamePath))
+        {
+            StatusText = "Game path is not set or does not exist. Configure it in Patch Generator Settings.";
+            return;
+        }
+
+        try
+        {
+            IsBusy = true;
+            PatchCommitStatus = "Preparing verified patch transaction...";
+            BackupSnapshotStatus = "Creating and verifying backup snapshot...";
+            VerificationStatus = "Writing and verifying staged CSV/DAT...";
+            StatusText = "Generating patch files...";
+
+            string patchId = PatchGenerator.GeneratePatch(GamePath, ModifiedAssets.ToList(), IsCompressEnabled);
+
+            string? snapshotPath = BackupManager.GetLatestBackupPath(GamePath);
+            BackupSnapshotStatus = snapshotPath is null
+                ? "No backup snapshot was created (no existing patch pair to back up)."
+                : $"Backup verified: {snapshotPath}";
+            PatchCommitStatus = $"Committed @{patchId}.csv + @{patchId}.dat under {Path.GetFullPath(GamePath)}";
+            VerificationStatus = "Verified: staged bytes, CSV metadata, committed files, and backup hashes.";
+            StatusText = $"Patch @{patchId} generated and verified.";
+
+            // Staged changes are cleared only after GeneratePatch returns successfully.
+            ModifiedAssets.Clear();
+        }
+        catch (Exception ex)
+        {
+            VerificationStatus = $"Verification failed: {ex.Message}";
+            PatchCommitStatus = "Patch commit failed; staged changes were retained.";
+            BackupSnapshotStatus = "Backup/commit status unavailable because generation did not complete.";
+            StatusText = $"Patch generation failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private void OpenPatchGeneratorSettings()
+    {
+        var dialog = new ModdingDialog
+        {
+            Owner = Application.Current.MainWindow,
+            GamePath = GamePath,
+            CompressData = IsCompressEnabled,
+            StagedChangeCount = ModifiedAssets.Count,
+            PatchCommitStatus = PatchCommitStatus,
+            BackupSnapshotStatus = BackupSnapshotStatus,
+            VerificationStatus = VerificationStatus,
+        };
+
+        if (dialog.ShowDialog() == true)
+        {
+            GamePath = dialog.GamePath;
+            IsCompressEnabled = dialog.CompressData;
+            StatusText = "Patch generator settings updated.";
+        }
+    }
+
+    // ── glTF/GLB conversion ──
+
+    [RelayCommand]
+    private async Task ExportAsGltfAsync()
+    {
+        AssetEntry? selected = SelectedEntry;
+        if (!IsModelModdingEnabled || selected is null) { StatusText = "Select a skeletal model package first."; return; }
+        var mdlSub = selected.SubEntries?.FirstOrDefault(s =>
+            s.FileName.Equals("modeldata.mdl", StringComparison.OrdinalIgnoreCase))
+            ?? selected.SubEntries?.FirstOrDefault(s => s.FileName.EndsWith(".mdl", StringComparison.OrdinalIgnoreCase));
+        if (mdlSub is null) { StatusText = "No MDL file found."; return; }
+        try
+        {
+            IsBusy = true; StatusText = "Converting MDL to GLB...";
+            byte[] mdlData = await Task.Run(() =>
+                AssetExtractor.GetSubBlob(mdlSub, selected, mdlSub.ContentDirectory));
+            var save = new SaveFileDialog
+            {
+                Title = "Export as GLB",
+                FileName = $"{selected.FileName}.glb",
+                Filter = "GLB files (*.glb)|*.glb|All files (*.*)|*.*"
+            };
+            if (save.ShowDialog() == true)
+            {
+                var model = await Task.Run(() => MDLParserExtended.Parse(mdlData));
+                await Task.Run(() => MdlToGltfConverter.WriteGlb(model, save.FileName));
+                StatusText = $"Exported GLB: {save.FileName}";
+            }
+        }
+        catch (Exception ex) { StatusText = $"GLB export failed: {ex.Message}"; }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task ReplaceWithGlbAsync()
+    {
+        AssetEntry? selected = SelectedEntry;
+        if (!IsModelModdingEnabled || selected is null) { StatusText = "Select a skeletal model package first."; return; }
+        var open = new OpenFileDialog
+        {
+            Title = "Select GLB for conversion",
+            Filter = "GLB files (*.glb)|*.glb|All files (*.*)|*.*"
+        };
+        if (open.ShowDialog() != true) return;
+        try
+        {
+            IsBusy = true; StatusText = "Converting GLB to MDL...";
+            var mds = selected.SubEntries?.FirstOrDefault(
+                s => s.FileName.Equals("modeldata.mdl", StringComparison.OrdinalIgnoreCase));
+            if (mds is null) { StatusText = "No modeldata.mdl found."; return; }
+            byte[] orig = await Task.Run(() =>
+                AssetExtractor.GetSubBlob(mds, selected, mds.ContentDirectory));
+            byte[] mdl = await Task.Run(() => GltfToMdlConverter.Convert(open.FileName, orig));
+            StageOrReplace(new ModifiedAssetEntry
+            {
+                ParentEntry = selected, SubEntry = mds,
+                ModifiedData = mdl, OriginalData = orig, Compress = IsCompressEnabled
+            });
+            StatusText = $"GLB -> MDL ({mdl.Length} bytes). Generate patch to apply.";
+        }
+        catch (Exception ex) { StatusText = $"GLB conversion failed: {ex.Message}"; }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task ExportModelTextureSetPngAsync()
+    {
+        if (!IsModelModdingEnabled || SelectedEntry is null || Library is null)
+        {
+            StatusText = "Select a skeletal model package from a loaded asset database first.";
+            return;
+        }
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select the parent folder for the PNG texture set"
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        string stem = Path.GetFileNameWithoutExtension(SelectedEntry.FileName);
+        string destination = Path.Combine(dialog.FolderName, $"{stem}_texture_set_png");
+        try
+        {
+            IsBusy = true;
+            StatusText = "Exporting model texture set as PNG...";
+            ModelTextureSetManifest manifest = await Task.Run(() =>
+                ModelTextureSetService.ExportPng(SelectedEntry, Library.All, destination));
+            StatusText = $"Exported {manifest.Textures.Count} PNG textures to {destination}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"PNG texture-set export failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExportModelTextureSetTgaAsync()
+    {
+        if (!IsModelModdingEnabled || SelectedEntry is null || Library is null)
+        {
+            StatusText = "Select a skeletal model package from a loaded asset database first.";
+            return;
+        }
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select the parent folder for the TGA texture set"
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        string stem = Path.GetFileNameWithoutExtension(SelectedEntry.FileName);
+        string destination = Path.Combine(dialog.FolderName, $"{stem}_texture_set_tga");
+        try
+        {
+            IsBusy = true;
+            StatusText = "Exporting model texture set as TGA...";
+            ModelTextureSetManifest manifest = await Task.Run(() =>
+                ModelTextureSetService.ExportTga(SelectedEntry, Library.All, destination));
+            StatusText = $"Exported {manifest.Textures.Count} TGA textures to {destination}";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"TGA texture-set export failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    [RelayCommand]
+    private async Task ExportModelWorkspaceAsync()
+    {
+        if (!IsModelModdingEnabled || SelectedEntry is null || Library is null)
+        {
+            StatusText = "Select a skeletal model package from a loaded asset database first.";
+            return;
+        }
+        var dialog = new OpenFolderDialog { Title = "Select the parent folder for the NG4 model workspace" };
+        if (dialog.ShowDialog() != true) return;
+        try
+        {
+            IsBusy = true;
+            StatusText = "Exporting model GLB and TGA texture set...";
+            Ng4ModWorkspaceExportResult result = await Task.Run(() => Ng4ModWorkspaceService.Export(SelectedEntry, Library.All, dialog.FolderName));
+            StatusText = $"Exported model workspace: {result.WorkspacePath}";
+        }
+        catch (Exception ex) { StatusText = $"Model workspace export failed: {ex.Message}"; }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task PackageNg4ModAsync()
+    {
+        if (Library is null || string.IsNullOrWhiteSpace(GamePath))
+        {
+            StatusText = "Load the asset database before packaging an NG4MOD.";
+            return;
+        }
+        var open = new OpenFileDialog
+        {
+            Title = "Select an exported NG4 workspace GLB",
+            Filter = "GLB files (*.glb)|*.glb|All files (*.*)|*.*"
+        };
+        if (open.ShowDialog() != true) return;
+        string stem = Path.GetFileNameWithoutExtension(open.FileName);
+        if (string.IsNullOrWhiteSpace(Ng4ModId)) Ng4ModId = "ronin." + stem.ToLowerInvariant().Replace(' ', '-');
+        if (string.IsNullOrWhiteSpace(Ng4ModName)) Ng4ModName = stem;
+        var metadataDialog = new Ng4ModMetadataDialog
+        {
+            Owner = Application.Current.MainWindow,
+            ModId = Ng4ModId,
+            Version = Ng4ModVersion,
+            ModName = Ng4ModName,
+            Author = Ng4ModAuthor,
+            Description = Ng4ModDescription,
+            CoverPath = Ng4ModCoverPath
+        };
+        if (metadataDialog.ShowDialog() != true) return;
+        Ng4ModId = metadataDialog.ModId;
+        Ng4ModVersion = metadataDialog.Version;
+        Ng4ModName = metadataDialog.ModName;
+        Ng4ModAuthor = metadataDialog.Author;
+        Ng4ModDescription = metadataDialog.Description;
+        Ng4ModCoverPath = metadataDialog.CoverPath;
+        var save = new SaveFileDialog
+        {
+            Title = "Save NG4MOD package",
+            FileName = Path.GetFileNameWithoutExtension(open.FileName) + ".ng4mod",
+            Filter = "NG4MOD packages (*.ng4mod)|*.ng4mod|All files (*.*)|*.*"
+        };
+        if (save.ShowDialog() != true) return;
+        try
+        {
+            IsBusy = true;
+            StatusText = "Converting GLB and packaging NG4MOD...";
+            string databasePath = Path.Combine(GamePath, "AssetDatabase.dat");
+            await using FileStream database = File.OpenRead(databasePath);
+            string databaseHash = Convert.ToHexString(await SHA256.HashDataAsync(database)).ToLowerInvariant();
+            Ng4ModWorkspacePackageResult result = await Task.Run(() => Ng4ModWorkspaceService.Package(
+                open.FileName, Library,
+                new Ng4ModWorkspacePackageRequest(
+                    ModId: Ng4ModId, Name: Ng4ModName,
+                    Version: Ng4ModVersion, Author: Ng4ModAuthor, Description: Ng4ModDescription, Dependencies: [],
+                    DestinationPath: save.FileName, AssetDatabaseSha256: databaseHash,
+                    CoverPath: string.IsNullOrWhiteSpace(Ng4ModCoverPath) ? null : Ng4ModCoverPath)));
+            StatusText = $"Packaged {result.PackagePath} ({result.ChangedTextureCount} changed textures).";
+        }
+        catch (Exception ex) { StatusText = $"NG4MOD packaging failed: {ex.Message}"; }
+        finally { IsBusy = false; }
+    }
+
+    [RelayCommand]
+    private async Task ImportModelTextureSetAsync()
+    {
+        if (!IsModelModdingEnabled || SelectedEntry is null || Library is null)
+        {
+            StatusText = "Select a skeletal model package from a loaded asset database first.";
+            return;
+        }
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select a RONIN PNG or TGA texture-set folder"
+        };
+        if (dialog.ShowDialog() != true) return;
+
+        try
+        {
+            IsBusy = true;
+            StatusText = "Validating and importing image texture set...";
+            string manifestPath = Path.Combine(dialog.FolderName, ModelTextureSetService.ManifestFileName);
+            if (!File.Exists(manifestPath))
+                throw new InvalidDataException($"Texture set is missing '{ModelTextureSetService.ManifestFileName}'.");
+            ModelTextureSetManifest manifest = ModelTextureSetService.DeserializeManifest(
+                await File.ReadAllTextAsync(manifestPath));
+            if (manifest.SchemaVersion is not (2 or 3))
+                throw new InvalidDataException("Selected folder is not a supported PNG or TGA texture set.");
+            if (!manifest.ModelAssetId.Equals(SelectedEntry.StringAssetID, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Texture set belongs to '{manifest.ModelPath}', not the selected model.");
+
+            ModelTextureImportPlan plan = await Task.Run(() =>
+                ModelTextureSetService.PlanImport(dialog.FolderName, Library.All, IsCompressEnabled));
+
+            foreach (ModifiedAssetEntry change in plan.Changes)
+                StageOrReplace(change);
+
+            StatusText = plan.Changes.Count == 0
+                ? $"No texture changes ({plan.UnchangedCount} unchanged); nothing staged."
+                : $"Staged {plan.Changes.Count} changed textures; {plan.UnchangedCount} unchanged. Generate patch to apply.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = $"Image texture-set import failed: {ex.Message}";
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private void StageOrReplace(ModifiedAssetEntry change)
+    {
+        ModifiedAssetEntry? existing = ModifiedAssets.FirstOrDefault(item =>
+            item.ParentEntry.AssetID.Equals(change.ParentEntry.AssetID) &&
+            string.Equals(item.SubEntry?.FileName, change.SubEntry?.FileName, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            ModifiedAssets.Remove(existing);
+        ModifiedAssets.Add(change);
     }
 }

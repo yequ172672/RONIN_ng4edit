@@ -9,9 +9,14 @@
         <local:MainWindowViewModel/>
     </Window.DataContext>
     <Window.Resources>
-        <DataTemplate DataType="{x:Type preview:TexturePreviewViewModel}" 
+        <DataTemplate DataType="{x:Type preview:TexturePreviewViewModel}"
                   xmlns:local="clr-namespace:RONIN.Preview">
-            <Image Source="{Binding Image}" Stretch="Uniform"/>
+            <StackPanel>
+                <Image Source="{Binding Image}" Stretch="Uniform"/>
+                <TextBlock Text="{Binding Width, StringFormat=Texture: {0}px}" Margin="8,6,8,0" Foreground="White"/>
+                <TextBlock Text="{Binding Height, StringFormat=Height: {0}px}" Margin="8,2,8,0" Foreground="White"/>
+                <TextBlock Text="{Binding MipCount, StringFormat=Mips: {0}}" Margin="8,2,8,8" Foreground="White"/>
+            </StackPanel>
         </DataTemplate>
         <DataTemplate DataType="{x:Type preview:AtlasTexturePreviewViewModel}">
             <Image Source="{Binding Image}" Stretch="Uniform"/>
@@ -70,20 +75,28 @@
                 <MenuItem Header="File">
                     <MenuItem Header="Load AssetDatabase" Command="{Binding LoadAssetDatabaseCommand}"></MenuItem>
                 </MenuItem>
-                <MenuItem Header="Modding Tools">
+                <MenuItem Header="Modding Tools" x:Name="ModdingToolsMenu">
                     <MenuItem Header="Export Selected Subfile"/>
                     <MenuItem Header="Export Selected Package" IsEnabled="{Binding HasSelectedEntry}" Command="{Binding ExportRaw}"/>
+                    <MenuItem Header="Export Selected Package as FBX" IsEnabled="{Binding HasSelectedEntry}" Command="{Binding ExportAsFbxCommand}"/>
+                    <MenuItem Header="Export Model as GLB" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ExportAsGltfCommand}"/>
+                    <MenuItem Header="Export Model Workspace (GLB + TGA)" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ExportModelWorkspaceCommand}"/>
+                    <MenuItem Header="Export Model Texture Set (PNG)" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ExportModelTextureSetPngCommand}"/>
+                    <MenuItem Header="Export Model Texture Set (TGA)" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ExportModelTextureSetTgaCommand}"/>
+                    <MenuItem Header="Package .ng4mod from Workspace GLB" Command="{Binding PackageNg4ModCommand}"/>
+                    <MenuItem Header="Export Selected Package as DDS" IsEnabled="{Binding IsTextureModdingEnabled}" Command="{Binding ExportTextureAsDdsCommand}"/>
                     <Separator></Separator>
                     <MenuItem Header="Replace Selected Subfile"/>
                     <MenuItem Header="Replace Selected Package (BETA)"/>
                     <MenuItem Header="Replace With Conversion">
-                        <MenuItem Header="Replace Selected Package with .DDS/.PNG" IsEnabled="False"/>
-                        <MenuItem Header="Replace Selected Package with .FBX" IsEnabled="False"/>
-                        <MenuItem Header="Replace Selected Package with .JSON" IsEnabled="False"/>
+                        <MenuItem Header="Replace Selected Package with .DDS" IsEnabled="{Binding IsTextureModdingEnabled}" Command="{Binding ReplaceSelectedPackageWithDdsCommand}"/>
+                        <MenuItem Header="Replace Selected Package with .FBX" IsEnabled="{Binding HasSelectedEntry}" Command="{Binding ReplaceWithFbxCommand}"/>
+                        <MenuItem Header="Replace Model from GLB" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ReplaceWithGlbCommand}"/>
+                        <MenuItem Header="Import Model Texture Set (PNG/TGA Folder)" IsEnabled="{Binding IsModelModdingEnabled}" Command="{Binding ImportModelTextureSetCommand}"/>
                     </MenuItem>
                     <Separator></Separator>
-                    <MenuItem Header="Generate Patch (.csv/.dat)"/>
-                    <MenuItem Header="Patch Generator Settings">
+                    <MenuItem Header="Generate Patch (.csv/.dat)" IsEnabled="{Binding HasStagedChanges}" Command="{Binding GeneratePatchCommand}"/>
+                    <MenuItem Header="Patch Generator Settings" Command="{Binding OpenPatchGeneratorSettingsCommand}">
                         <CheckBox IsEnabled="False">Compress Data?</CheckBox>
                     </MenuItem>
                     
@@ -126,7 +139,21 @@
                     <ColumnDefinition Width="200"></ColumnDefinition>
                 </Grid.ColumnDefinitions>
 
-                <Label Grid.Column="0" FontWeight="Bold">Changed Files List</Label>
+                <Grid Grid.Column="0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="*"/>
+                    </Grid.RowDefinitions>
+                    <Label Grid.Row="0" FontWeight="Bold">Changed Files List</Label>
+                    <TextBlock Grid.Row="0" Text="{Binding ModifiedAssets.Count, StringFormat={} ({0} staged)}" HorizontalAlignment="Right" Margin="0,0,4,0"/>
+                    <ListView Grid.Row="1" ItemsSource="{Binding ModifiedAssets}">
+                        <ListView.View>
+                            <GridView>
+                                <GridViewColumn Header="Pending Change" Width="180" DisplayMemberBinding="{Binding ParentEntry.Path}"/>
+                            </GridView>
+                        </ListView.View>
+                    </ListView>
+                </Grid>
                 <Border Grid.Column="1" Background="#111111">
                     <ContentControl Content="{Binding PreviewContent}"/>
                 </Border>
