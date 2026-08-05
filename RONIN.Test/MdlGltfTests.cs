@@ -5,19 +5,23 @@ using System.Text.Json.Nodes;
 
 internal static class MdlGltfTests
 {
-    private static readonly string FixturePath = Path.GetFullPath(Path.Combine(
-        AppContext.BaseDirectory, "..", "..", "..", "..", "ExtractedModels", "Pl0000_DDX1",
-        "PL0000_DDX1__modeldata.mdl"));
-
     public static void Run()
     {
-        if (!File.Exists(FixturePath))
+        string? fixturePath = Environment.GetEnvironmentVariable("RONIN_NG4_MDL_FIXTURE");
+        if (string.IsNullOrWhiteSpace(fixturePath))
         {
-            Console.WriteLine($"MDL/glTF real-fixture tests skipped; fixture not found: {FixturePath}");
+            Console.WriteLine("MDL/glTF real-fixture tests skipped; set RONIN_NG4_MDL_FIXTURE to a modeldata.mdl file to enable them.");
             return;
         }
 
-        MDLFullData model = MDLParserExtended.Parse(File.ReadAllBytes(FixturePath));
+        fixturePath = Path.GetFullPath(fixturePath);
+        if (!File.Exists(fixturePath))
+        {
+            Console.WriteLine($"MDL/glTF real-fixture tests skipped; fixture not found: {fixturePath}");
+            return;
+        }
+
+        MDLFullData model = MDLParserExtended.Parse(File.ReadAllBytes(fixturePath));
         var unweightedGroup = new VertexGroup
         {
             Positions = [Vector3.Zero],

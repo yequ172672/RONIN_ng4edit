@@ -46,7 +46,7 @@ static void PrintUsage()
 {
     Console.WriteLine("RONIN prototype verification");
     Console.WriteLine("Usage: dotnet run --project RONIN.Test -c Release -- <switch> [...]");
-    Console.WriteLine("  --mdl-gltf-tests             MDL <-> GLB round-trip (requires local fixture)");
+    Console.WriteLine("  --mdl-gltf-tests             MDL <-> GLB round-trip (optional RONIN_NG4_MDL_FIXTURE)");
     Console.WriteLine("  --model-texture-set-tests    PNG/TGA, DDS and mip workflow");
     Console.WriteLine("  --ng4-lod-param-tests        LOD threshold and replacement plan");
     Console.WriteLine("  --ng4mod-package-tests       ng4mod v2 manifest contract");

@@ -67,6 +67,6 @@ dotnet run --project RONIN.Test/RONIN.Test.csproj -c Release -- --model-texture-
 dotnet run --project RONIN.Test/RONIN.Test.csproj -c Release -- --mdl-gltf-tests
 ```
 
-没有本机模型夹具时，最后一项会安全跳过真实模型检查；其余契约测试仍应通过。
+没有本机模型夹具时，最后一项会安全跳过真实模型检查；其余契约测试仍应通过。需要启用真实模型检查时，先将 `RONIN_NG4_MDL_FIXTURE` 设置为 `modeldata.mdl` 文件路径。
 
 要验证完整的真实资产流程，可先设置 `RONIN_NG4_ASSETS` 指向游戏的 `Assets` 目录，再运行 `--ng4mod-real-workflow-tests`。该测试只在临时目录生成并删除验证包。
