@@ -11,4 +11,11 @@
     <ProjectReference Include="..\YakumoLib\YakumoLib.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <None Include="..\RONIN\DeflateSharp.dll"
+          Link="DeflateSharp.dll"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
 </Project>

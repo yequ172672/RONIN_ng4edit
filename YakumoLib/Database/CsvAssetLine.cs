@@ -15,6 +15,8 @@ namespace YakumoLib.Database
         public required long CompressedSize { get; init; }
         public required int FileCount { get; init; }
         public required string SourceArchive { get; init; }
+        public required string Unknown { get; init; }
+        public required string Metadata { get; init; }
         public required IReadOnlyList<SubAssetEntry> SubEntries { get; init; }
 
     }

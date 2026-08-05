@@ -86,6 +86,20 @@
                     <MenuItem Header="Patch Generator Settings">
                         <CheckBox IsEnabled="False">Compress Data?</CheckBox>
                     </MenuItem>
+                    <Separator/>
+                    <MenuItem Header="NG4 Mod (GLB / PNG / TGA / NG4MOD)">
+                        <MenuItem Header="Export selected model workspace (GLB + TGA)"
+                                  IsEnabled="{Binding IsModelSelected}"
+                                  Command="{Binding ExportNg4ModelWorkspaceCommand}"/>
+                        <MenuItem Header="Export selected texture set (PNG)"
+                                  IsEnabled="{Binding IsModelSelected}"
+                                  Command="{Binding ExportNg4TextureSetPngCommand}"/>
+                        <MenuItem Header="Export selected texture set (TGA)"
+                                  IsEnabled="{Binding IsModelSelected}"
+                                  Command="{Binding ExportNg4TextureSetTgaCommand}"/>
+                        <MenuItem Header="Package edited workspace as NG4MOD v2"
+                                  Command="{Binding PackageNg4ModCommand}"/>
+                    </MenuItem>
                     
                 </MenuItem>
                 <MenuItem Header="Back" IsEnabled="{Binding HasBackEntry}" Command="{Binding GoBackToPreviousEntry}"/>

@@ -1,177 +1,153 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.InteropServices;
-using System.Text;
-using System.Threading.Tasks;
 using YakumoLib.DEFLATE;
-using static System.Runtime.InteropServices.JavaScript.JSType;
 
-namespace YakumoLib.Assets
+namespace YakumoLib.Assets;
+
+public static class AssetExtractor
 {
-
-
-
-    public static class AssetExtractor
+    private static byte[] ReadExact(FileStream stream, int size)
     {
+        if (size < 0)
+            throw new InvalidDataException("A negative asset size was requested.");
 
-        private static byte[] ReadExact(FileStream fs, int size)
+        var buffer = new byte[size];
+        int totalRead = 0;
+        while (totalRead < size)
         {
-            var buffer = new byte[size];
-            int totalRead = 0;
-            while (totalRead < size)
-            {
-                int read = fs.Read(buffer, totalRead, size - totalRead);
-                totalRead += read;
-            }
-            return buffer;
+            int read = stream.Read(buffer, totalRead, size - totalRead);
+            if (read == 0)
+                throw new EndOfStreamException($"Unexpected EOF after {totalRead} of {size} bytes.");
+            totalRead += read;
+        }
+        return buffer;
+    }
+
+    public static byte[] GetParentBlob(AssetEntry parent, string archiveRootDirectory)
+    {
+        if (parent.Offset is null || parent.Size is null || parent.SourceArchive is null)
+            throw new InvalidOperationException($"Asset {parent.Path} has been pruned.");
+
+        string archivePath = ResolveArchivePath(archiveRootDirectory, parent.SourceArchive);
+        long compressedSize = parent.CompressedSize ?? 0;
+        long storedSize = compressedSize != 0 ? compressedSize : parent.Size.Value;
+        ValidateFileRange(archivePath, parent.Offset.Value, storedSize, parent.Path);
+
+        using var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        stream.Position = parent.Offset.Value;
+        byte[] raw = ReadExact(stream, CheckedArrayLength(storedSize, parent.Path));
+        if (compressedSize == 0)
+            return raw;
+
+        byte[] output = new byte[CheckedArrayLength(parent.Size.Value, parent.Path)];
+        Decompress(raw, output, parent.Path);
+        return output;
+    }
+
+    public static byte[] GetSubBlob(SubAssetEntry sub, AssetEntry parent, string archiveRootDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(sub.SourceArchive))
+            throw new InvalidOperationException($"Asset {sub.FileName} has been pruned.");
+        if (sub.Offset < 0 || sub.Size < 0 || sub.CompressedSize < 0)
+            throw new InvalidDataException($"Sub-asset '{sub.FileName}' has a negative offset or size.");
+
+        if (!sub.IsGlobal)
+        {
+            byte[] parentData = GetParentBlob(parent, archiveRootDirectory);
+            ValidateBufferRange(parentData.LongLength, sub.Offset, sub.Size, sub.FileName);
+            return parentData.AsSpan(CheckedArrayLength(sub.Offset, sub.FileName), CheckedArrayLength(sub.Size, sub.FileName)).ToArray();
         }
 
-        public static byte[] GetParentBlob(AssetEntry parent, string archiveRootDirectory)
+        string archivePath = ResolveArchivePath(archiveRootDirectory, sub.SourceArchive);
+        long storedSize = sub.CompressedSize != 0 ? sub.CompressedSize : sub.Size;
+        ValidateFileRange(archivePath, sub.Offset, storedSize, sub.FileName);
+
+        using var stream = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        stream.Position = sub.Offset;
+        byte[] raw = ReadExact(stream, CheckedArrayLength(storedSize, sub.FileName));
+        if (sub.CompressedSize == 0)
+            return raw;
+
+        byte[] output = new byte[CheckedArrayLength(sub.Size, sub.FileName)];
+        Decompress(raw, output, sub.FileName);
+        return output;
+    }
+
+    public static void ExtractAll(AssetEntry target, string outputDir)
+    {
+        string outputRoot = Path.GetFullPath(outputDir);
+        string packageRoot = ResolveOutputPath(outputRoot, Path.GetFileNameWithoutExtension(target.FileName));
+        Directory.CreateDirectory(packageRoot);
+
+        foreach (SubAssetEntry sub in target.SubEntries ?? [])
         {
-            if (parent.Offset is null || parent.SourceArchive is null)
-            {
-                throw new InvalidOperationException($"Asset {parent.Path} has been pruned.");
-            }
-
-            string archivePath = Path.Combine(archiveRootDirectory, parent.SourceArchive+".dat");
-
-            using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            fs.Seek(parent.Offset.Value, SeekOrigin.Begin);
-
-            bool compressed = parent.CompressedSize != 0;
-            int readSize = compressed ? (int)parent.CompressedSize!.Value : (int)parent.Size!.Value;
-
-            var raw = ReadExact(fs, readSize);
-
-            if (!compressed)
-                return raw;
-
-            var output = new byte[parent.Size!.Value];
-
-            unsafe
-            {
-                fixed (byte* srcPtr = raw)
-                fixed (byte* dstPtr = output)
-                {
-                    int result = DeflateSharp.GDeflate_Decompress(
-                        (IntPtr)srcPtr, (nuint)raw.Length,
-                        (IntPtr)dstPtr, (nuint)output.Length,
-                        numWorkers: 1);
-
-                    if (result != 0)
-                        throw new InvalidDataException(
-                            $"GDeflate decompression failed for '{parent.Path}' (code {result}).");
-                }
-            }
-
-            return output;
-
+            byte[] data = GetSubBlob(sub, target, sub.ContentDirectory ?? string.Empty);
+            string outputPath = ResolveOutputPath(packageRoot, sub.FileName);
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            File.WriteAllBytes(outputPath, data);
         }
+    }
 
-        public static byte[] GetSubBlob(SubAssetEntry sub, AssetEntry parent, string archiveRootDirectory)
+    private static string ResolveArchivePath(string rootDirectory, string sourceArchive)
+    {
+        string root = Path.GetFullPath(rootDirectory);
+        string candidate = Path.GetFullPath(Path.Combine(root, sourceArchive + ".dat"));
+        EnsureWithinRoot(root, candidate, "Archive path");
+        return candidate;
+    }
+
+    private static string ResolveOutputPath(string rootDirectory, string relativePath)
+    {
+        if (Path.IsPathRooted(relativePath))
+            throw new InvalidDataException($"Export path '{relativePath}' must be relative.");
+
+        string candidate = Path.GetFullPath(Path.Combine(rootDirectory, relativePath));
+        EnsureWithinRoot(rootDirectory, candidate, "Export path");
+        return candidate;
+    }
+
+    private static void EnsureWithinRoot(string rootDirectory, string candidate, string label)
+    {
+        string root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootDirectory));
+        if (string.Equals(root, candidate, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        string prefix = root + Path.DirectorySeparatorChar;
+        if (!candidate.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"{label} escapes its configured root: '{candidate}'.");
+    }
+
+    private static void ValidateFileRange(string path, long offset, long size, string assetName)
+    {
+        if (offset < 0 || size < 0)
+            throw new InvalidDataException($"Asset '{assetName}' has a negative offset or size.");
+
+        long length = new FileInfo(path).Length;
+        ValidateBufferRange(length, offset, size, assetName);
+    }
+
+    private static void ValidateBufferRange(long length, long offset, long size, string assetName)
+    {
+        if (offset < 0 || size < 0 || offset > length || size > length - offset)
+            throw new InvalidDataException($"Asset '{assetName}' range [{offset}, {offset + size}) exceeds source length {length}.");
+    }
+
+    private static int CheckedArrayLength(long value, string assetName)
+    {
+        if (value < 0 || value > int.MaxValue)
+            throw new InvalidDataException($"Asset '{assetName}' size {value} cannot be represented in memory.");
+        return (int)value;
+    }
+
+    private static unsafe void Decompress(byte[] raw, byte[] output, string assetName)
+    {
+        fixed (byte* source = raw)
+        fixed (byte* destination = output)
         {
-            if (sub.SourceArchive is null)
-            {
-                throw new InvalidOperationException($"Asset {sub.FileName} has been pruned.");
-            }
-
-            if (!sub.IsGlobal)
-            {
-                byte[] parentData = GetParentBlob(parent, archiveRootDirectory);
-                if (parentData == null)
-                {
-                    return [];
-                }
-
-                // TODO: Seek into the byte data and return a range from sub.Offset to sub.Size (compresed size does not apply to in-parent sub archives)
-
-
-                return parentData.AsSpan((int)sub.Offset, (int)sub.Size).ToArray();
-            }
-            else
-            {
-                string archivePath = Path.Combine(archiveRootDirectory, sub.SourceArchive + ".dat");
-
-                using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-                fs.Seek(sub.Offset, SeekOrigin.Begin);
-
-                bool compressed = sub.CompressedSize != 0;
-                int readSize = compressed ? (int)sub.CompressedSize : (int)sub.Size;
-
-                var raw = ReadExact(fs, readSize);
-
-                if (!compressed)
-                    return raw;
-
-                var output = new byte[sub.Size];
-
-                unsafe
-                {
-                    fixed (byte* srcPtr = raw)
-                    fixed (byte* dstPtr = output)
-                    {
-                        int result = DeflateSharp.GDeflate_Decompress(
-                            (IntPtr)srcPtr, (nuint)raw.Length,
-                            (IntPtr)dstPtr, (nuint)output.Length,
-                            numWorkers: 1);
-
-                        if (result != 0)
-                            throw new InvalidDataException(
-                                $"GDeflate decompression failed for '{parent.Path}' (code {result}).");
-                    }
-                }
-
-                return output;
-            }
-
-
-
-
-
+            int result = DeflateSharp.GDeflate_Decompress(
+                (IntPtr)source, (nuint)raw.Length,
+                (IntPtr)destination, (nuint)output.Length,
+                numWorkers: 1);
+            if (result != 0)
+                throw new InvalidDataException($"GDeflate decompression failed for '{assetName}' (code {result}).");
         }
-
-        public static void ExtractAll(AssetEntry target, string outputDir)
-        {
-
-            foreach (SubAssetEntry sub in target.SubEntries)
-            {
-                byte[] data = GetSubBlob(sub, target, sub.ContentDirectory);
-
-                Directory.CreateDirectory(Path.Join(outputDir, Path.GetFileNameWithoutExtension(target.FileName)));
-                File.WriteAllBytes(Path.Join(outputDir, Path.GetFileNameWithoutExtension(target.FileName), sub.FileName), data);
-            }
-
-
-        }
-
-
-
-        /*public static byte[] ReadBytes(AssetEntry parent, SubAssetEntry sub, string archiveRootDirectory)
-        {
-            string archivePath = Path.Combine(archiveRootDirectory, sub.SourceArchive);
-
-            using var fs = new FileStream(archivePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-
-
-            bool global = sub.IsGlobal;
-            bool compressed = false;
-
-            if (!global)
-            {
-                compressed = (parent.CompressedSize != 0);
-            }
-            else
-            {
-                compressed = (sub.CompressedSize != 0);
-            }
-
-            // if it's not global we need to decompress the entire parent blob, then seek to the sub.offset
-            // if it is global we just need to decompress the blob the sub points too. 
-            // this format is super weird
-
-
-        }*/
-
     }
 }

@@ -53,7 +53,7 @@ namespace YakumoLib.Assets
 
             progress?.Report($"Building file entries...");
 
-            var csvProgress = new Progress<(string fileName, int done, int total, int size)>(p =>
+            var csvProgress = new Progress<(string fileName, int done, int total, long size)>(p =>
             {
                 if (p.done >= 0)
                     Console.WriteLine($"{p.fileName} ({p.size/ 1e+6f:F2}MB) [DONE] ({p.done}/{p.total})");

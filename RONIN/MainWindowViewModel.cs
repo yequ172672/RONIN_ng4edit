@@ -19,7 +19,10 @@ public sealed partial class MainWindowViewModel : ObservableObject
     [ObservableProperty] private int _progressCurrent;
     [ObservableProperty] private int _progressTotal = 1;
     [ObservableProperty] private string _activePath = "/";
-    [ObservableProperty] [NotifyPropertyChangedFor(nameof(HasSelectedEntry))] private AssetEntry _selectedEntry = null;
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasSelectedEntry))]
+    [NotifyPropertyChangedFor(nameof(IsModelSelected))]
+    private AssetEntry _selectedEntry = null;
     [ObservableProperty][NotifyPropertyChangedFor(nameof(HasBackEntry))] private AssetEntry _previousEntry = null;
 
     private readonly AssetPreviewRegistry _previewRegistry;
@@ -28,6 +31,7 @@ public sealed partial class MainWindowViewModel : ObservableObject
 
     public bool HasSelectedEntry => SelectedEntry is not null;
     public bool HasBackEntry => PreviousEntry is not null;
+    public bool IsModelSelected => SelectedEntry?.Type == AssetType.SkeletalMesh;
 
     public AssetLibrary? Library { get; private set; }
     
