@@ -20,4 +20,4 @@ Ryu, displayed in the RONIN model previewer.
 
 ## NG4 Mod workflow
 
-The prototype includes a read-only asset browser, GLB model workspaces, PNG/TGA texture sets, and verified `.ng4mod` v2 export. See [MODDING_GUIDE.md](MODDING_GUIDE.md) for the end-user workflow, package layout, supported boundaries, and verification commands.
+The prototype includes a read-only asset browser, GLB model workspaces, PNG/TGA texture sets, and verified `.ng4mod` v2 export. See [MODDING_GUIDE.md](MODDING_GUIDE.md) for the end-user workflow, package layout, supported boundaries, and verification commands. Third-party dependency terms are listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

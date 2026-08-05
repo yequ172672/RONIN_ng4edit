@@ -312,7 +312,7 @@ public static class ModelTextureSetTests
         File.WriteAllText(Path.Combine(directory, ModelTextureSetService.ManifestFileName), ModelTextureSetService.SerializeManifest(manifest));
     }
 
-    private static AssetEntry CreateSyntheticTexture(string directory, string archiveName, string path, string id, int dxgiFormat)
+    internal static AssetEntry CreateSyntheticTexture(string directory, string archiveName, string path, string id, int dxgiFormat)
     {
         int[] logical = [64, 16, 16, 16];
         int[] capacities = [80, 32, 32, 32];

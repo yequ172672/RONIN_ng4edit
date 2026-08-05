@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using YakumoLib;
 using YakumoLib.Assets;
+using YakumoLib.Formats;
 using YakumoLib.Modding;
 
 internal static class Ng4ModExporterTests
@@ -41,6 +42,7 @@ internal static class Ng4ModExporterTests
     public static void Run()
     {
         ExportsVerifiedPackageWithExactManifestAndPayload();
+        ExportsTextureOnlyAndCombinedPackages();
         ExportsAndVerifiesPngCoverOutsideDatPrefix();
         MultiAssetWriterBindsPayloadsByAssetIdRegardlessOfInputOrder();
         ExportsEmptyCsvMetadataAsExactEmptyStrings();
@@ -52,6 +54,58 @@ internal static class Ng4ModExporterTests
         ManifestSizeFieldsRemainInt64();
         GoldenFixtureUsesStrictConsumerContract();
         Console.WriteLine("NG4MOD exporter focused tests passed.");
+    }
+
+    private static void ExportsTextureOnlyAndCombinedPackages()
+    {
+        using var temp = new TemporaryDirectory();
+        string assetRoot = Path.Combine(temp.Path, "assets");
+        Directory.CreateDirectory(assetRoot);
+        AssetEntry texture = ModelTextureSetTests.CreateSyntheticTexture(
+            assetRoot,
+            "texture-fixture",
+            "Assets/Character/Test/Texture/Fixture",
+            "00000030-00000000-00000000-00000000",
+            78) with
+        {
+            StoragePath = "Assets/Files/3/0/0/00000030-00000000-00000000-00000000/asset.bin",
+            CsvUnknown = "2",
+            CsvMetadata = "texture-fixture"
+        };
+        TexturePackageDdsData original = TexturePackageDds.Extract(texture, assetRoot);
+        byte[] editedDds = original.DdsBytes.ToArray();
+        editedDds[^1] ^= 1;
+        var textureChange = new ModifiedAssetEntry
+        {
+            ParentEntry = texture,
+            ModifiedData = editedDds,
+            OriginalData = original.DdsBytes,
+            Compress = false
+        };
+
+        string textureOnly = Path.Combine(temp.Path, "texture-only.ng4mod");
+        _ = Ng4ModPackageExporter.Export(CreateRequest(textureOnly, [textureChange]));
+        Ng4ModPackageExporter.VerifyPackage(textureOnly);
+        using (JsonDocument textureManifest = ReadManifest(textureOnly))
+        {
+            JsonElement asset = textureManifest.RootElement.GetProperty("assets")[0];
+            Assert(asset.GetProperty("asset_type").GetString() == "Texture", "Texture-only package lost its asset type.");
+            JsonElement.ArrayEnumerator subEntries = asset.GetProperty("sub_entries").EnumerateArray();
+            var entries = subEntries.Select(sub => (Name: sub.GetProperty("name").GetString()!, Addressing: sub.GetProperty("addressing").GetString()!)).ToArray();
+            Assert(entries.Any(entry => entry.Name == "Image.img" && entry.Addressing == "local"), "Texture-only package lost Image.img.");
+            Assert(entries.Any(entry => entry.Name == "Metadata.bin" && entry.Addressing == "local"), "Texture-only package lost local Metadata.bin.");
+            Assert(entries.Any(entry => entry.Name == "mip0.img" && entry.Addressing == "global"), "Texture-only package lost global mip0.img.");
+        }
+
+        string combined = Path.Combine(temp.Path, "model-and-texture.ng4mod");
+        ModifiedAssetEntry modelChange = CreateWholeParentChange([7, 8, 9, 10]);
+        _ = Ng4ModPackageExporter.Export(CreateRequest(combined, [modelChange, textureChange]));
+        Ng4ModPackageExporter.VerifyPackage(combined);
+        using JsonDocument combinedManifest = ReadManifest(combined);
+        JsonElement[] assets = combinedManifest.RootElement.GetProperty("assets").EnumerateArray().ToArray();
+        Assert(assets.Length == 2, "Combined model and texture package did not contain two parent assets.");
+        Assert(assets.Any(asset => asset.GetProperty("asset_type").GetString() == "SkeletalMesh"), "Combined package lost the model parent.");
+        Assert(assets.Any(asset => asset.GetProperty("asset_type").GetString() == "Texture"), "Combined package lost the texture parent.");
     }
 
     private static void ExportsAndVerifiesPngCoverOutsideDatPrefix()
