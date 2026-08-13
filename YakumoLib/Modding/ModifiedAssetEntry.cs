@@ -26,4 +26,7 @@ public sealed record ModifiedAssetEntry
 
     /// <summary>Whether the game payload should request compression. NG4MOD v2 currently requires this to be false.</summary>
     public bool Compress { get; init; }
+
+    /// <summary>Whether a texture replacement may change its DDS dimensions or mip layout.</summary>
+    public bool AllowTextureLayoutChange { get; init; }
 }

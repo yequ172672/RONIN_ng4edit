@@ -211,7 +211,7 @@ public static class TexturePackageDds
         return new TexturePackageImportResult(header.ToArray(), mipPayloads);
     }
 
-    public static void ValidateImportAgainstAsset(byte[] ddsBytes, AssetEntry entry)
+    public static void ValidateImportAgainstAsset(byte[] ddsBytes, AssetEntry entry, bool allowLayoutChange = false)
     {
         ArgumentNullException.ThrowIfNull(ddsBytes);
         ArgumentNullException.ThrowIfNull(entry);
@@ -226,32 +226,35 @@ public static class TexturePackageDds
         // The header blob may be smaller than the original Image.img because the game
         // stores extra metadata bytes after the DDS header. The extra bytes are preserved
         // during import by only overwriting the first HeaderBlob.Length bytes of Image.img.
-        if (split.HeaderBlob.Length > imageHeaderEntry.Size)
+        if (!allowLayoutChange && split.HeaderBlob.Length > imageHeaderEntry.Size)
             throw new InvalidDataException($"Imported DDS header blob length {split.HeaderBlob.Length} exceeds Image.img capacity {imageHeaderEntry.Size}.");
 
-        if (split.MipPayloads.Count != entry.SubEntries.Count(s => s.FileName.StartsWith("mip", StringComparison.OrdinalIgnoreCase)))
+        if (!allowLayoutChange && split.MipPayloads.Count != entry.SubEntries.Count(s => s.FileName.StartsWith("mip", StringComparison.OrdinalIgnoreCase)))
             throw new InvalidDataException("Imported DDS mip count does not match the existing texture package layout.");
 
         for (int i = 0; i < split.MipPayloads.Count; i++)
         {
-            var mipEntry = entry.SubEntries.FirstOrDefault(s => s.FileName.Equals($"mip{i}.img", StringComparison.OrdinalIgnoreCase))
-                ?? throw new InvalidDataException($"Texture '{entry.Path}' is missing mip{i}.img.");
-            if (split.MipPayloads[i].Length > mipEntry.Size)
+            var mipEntry = entry.SubEntries.FirstOrDefault(s => s.FileName.Equals($"mip{i}.img", StringComparison.OrdinalIgnoreCase));
+            if (mipEntry is null && !allowLayoutChange)
+                throw new InvalidDataException($"Texture '{entry.Path}' is missing mip{i}.img.");
+            if (!allowLayoutChange && split.MipPayloads[i].Length > mipEntry!.Size)
                 throw new InvalidDataException($"Imported DDS mip{i} payload {split.MipPayloads[i].Length} exceeds template capacity {mipEntry.Size}.");
         }
     }
 
-    public static TexturePackageImportResult CreateTemplateImport(byte[] ddsBytes, AssetEntry entry)
+    public static TexturePackageImportResult CreateTemplateImport(byte[] ddsBytes, AssetEntry entry, bool allowLayoutChange = false)
     {
         ArgumentNullException.ThrowIfNull(ddsBytes);
         ArgumentNullException.ThrowIfNull(entry);
-        ValidateImportAgainstAsset(ddsBytes, entry);
+        ValidateImportAgainstAsset(ddsBytes, entry, allowLayoutChange);
         TexturePackageImportResult logical = SplitForImport(ddsBytes);
         IReadOnlyList<SubAssetEntry> subEntries = entry.SubEntries!;
         SubAssetEntry imageEntry = subEntries.Single(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase));
         string contentDirectory = imageEntry.ContentDirectory ?? entry.ContentDirectory
             ?? throw new InvalidDataException($"Texture '{entry.Path}' has no content directory.");
         byte[] originalImage = AssetExtractor.GetSubBlob(imageEntry, entry, contentDirectory);
+        if (allowLayoutChange)
+            return CreateDynamicTemplateImport(ddsBytes, logical, originalImage);
         int mipCount = logical.MipPayloads.Count;
         int ddsHeaderLength = GetDdsHeaderLength(ddsBytes);
         int descriptorEnd = checked(TexturePackageHeaderLength + mipCount * TexturePackageMipInfoLength);
@@ -273,6 +276,36 @@ public static class TexturePackageDds
             padded.Add(replacement);
         }
         return new TexturePackageImportResult(header, padded);
+    }
+
+    private static TexturePackageImportResult CreateDynamicTemplateImport(byte[] ddsBytes, TexturePackageImportResult logical, byte[] originalImage)
+    {
+        if (originalImage.Length < TexturePackageHeaderLength)
+            throw new InvalidDataException("Texture package Image.img is too small for its original header.");
+        int originalMipCount = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(originalImage.AsSpan(4, 4)));
+        int originalDescriptorEnd = checked(TexturePackageHeaderLength + originalMipCount * 8);
+        if (originalImage.Length < originalDescriptorEnd + DdsHeaderWithMagicLength)
+            throw new InvalidDataException("Texture package Image.img is too small for its original mip table.");
+        int originalDdsHeaderLength = GetDdsHeaderLength(originalImage.AsSpan(originalDescriptorEnd));
+        int originalTailOffset = checked(originalDescriptorEnd + originalDdsHeaderLength);
+
+        int ddsHeaderLength = GetDdsHeaderLength(ddsBytes);
+        int descriptorEnd = checked(TexturePackageHeaderLength + logical.MipPayloads.Count * 8);
+        byte[] header = new byte[checked(descriptorEnd + ddsHeaderLength + originalImage.Length - originalTailOffset)];
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0, 4), checked((uint)ddsBytes.Length));
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(4, 4), checked((uint)logical.MipPayloads.Count));
+        int virtualOffset = 0;
+        for (int i = 0; i < logical.MipPayloads.Count; i++)
+        {
+            byte[] payload = logical.MipPayloads[i];
+            int offset = TexturePackageHeaderLength + i * 8;
+            BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(offset, 4), checked((uint)virtualOffset));
+            BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(offset + 4, 4), checked((uint)payload.Length));
+            virtualOffset = checked(virtualOffset + payload.Length);
+        }
+        ddsBytes.AsSpan(0, ddsHeaderLength).CopyTo(header.AsSpan(descriptorEnd));
+        originalImage.AsSpan(originalTailOffset).CopyTo(header.AsSpan(descriptorEnd + ddsHeaderLength));
+        return new TexturePackageImportResult(header, logical.MipPayloads.Select(payload => payload.ToArray()).ToArray());
     }
 
     private static int[] BuildBlockCompressedMipLengths(ReadOnlySpan<byte> ddsBytes, int width, int height, int mipCount)

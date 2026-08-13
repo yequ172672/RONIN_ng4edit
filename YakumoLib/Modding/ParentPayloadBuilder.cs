@@ -67,8 +67,8 @@ public static class ParentPayloadBuilder
                     throw new InvalidOperationException($"Asset '{parent.Path}' has multiple whole-parent replacements.");
                 if (parent.Type == AssetType.Texture)
                 {
-                    TexturePackageImportResult splitTexture = TexturePackageDds.CreateTemplateImport(wholeParent.ModifiedData, parent);
-                    byte[] textureParent = BuildTextureParent(parent, splitTexture, out NormalizedSubEntry[] textureSubEntries);
+                    TexturePackageImportResult splitTexture = TexturePackageDds.CreateTemplateImport(wholeParent.ModifiedData, parent, wholeParent.AllowTextureLayoutChange);
+                    byte[] textureParent = BuildTextureParent(parent, splitTexture, wholeParent.AllowTextureLayoutChange, out NormalizedSubEntry[] textureSubEntries);
                     result.Add(ParentPayload.TakeOwnership(parent, textureParent, textureSubEntries));
                     continue;
                 }
@@ -241,6 +241,7 @@ public static class ParentPayloadBuilder
     private static byte[] BuildTextureParent(
         AssetEntry parent,
         TexturePackageImportResult splitTexture,
+        bool allowLayoutChange,
         out NormalizedSubEntry[] subEntries)
     {
         if (parent.SubEntries is null || parent.SubEntries.Count == 0)
@@ -248,6 +249,35 @@ public static class ParentPayloadBuilder
 
         using var rebuilt = new MemoryStream();
         var entries = new List<NormalizedSubEntry>(parent.SubEntries.Count);
+        if (allowLayoutChange)
+        {
+            bool insertedMips = false;
+            SubAssetEntry templateMip = parent.SubEntries.Where(sub => sub.FileName.StartsWith("mip", StringComparison.OrdinalIgnoreCase)).OrderBy(sub => ParseMipIndex(sub.FileName)).FirstOrDefault()
+                ?? throw new InvalidDataException($"Texture '{parent.Path}' has no mip subfiles.");
+            foreach (SubAssetEntry sub in parent.SubEntries)
+            {
+                if (sub.FileName.StartsWith("mip", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (insertedMips) continue;
+                    for (int i = 0; i < splitTexture.MipPayloads.Count; i++)
+                    {
+                        byte[] mipBytes = splitTexture.MipPayloads[i];
+                        long mipOffset = rebuilt.Position;
+                        rebuilt.Write(mipBytes);
+                        entries.Add(new NormalizedSubEntry($"mip{i}.img", mipOffset, mipBytes.LongLength, templateMip.IsGlobal));
+                    }
+                    insertedMips = true;
+                    continue;
+                }
+                byte[] bytes = sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase) ? splitTexture.HeaderBlob : AssetExtractor.GetSubBlob(sub, parent, sub.ContentDirectory);
+                long offset = rebuilt.Position;
+                rebuilt.Write(bytes);
+                entries.Add(new NormalizedSubEntry(sub.FileName, offset, bytes.LongLength, sub.IsGlobal));
+            }
+            if (!insertedMips) throw new InvalidDataException($"Texture '{parent.Path}' has no mip insertion point.");
+            subEntries = entries.ToArray();
+            return rebuilt.ToArray();
+        }
         foreach (SubAssetEntry sub in parent.SubEntries)
         {
             byte[] bytes;

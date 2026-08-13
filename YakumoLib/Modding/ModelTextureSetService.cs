@@ -19,7 +19,9 @@ public sealed record ModelTextureSetManifest(
     string ModelPath,
     DateTimeOffset ExportedAtUtc,
     IReadOnlyList<ModelTextureSetEntry> Textures,
-    IReadOnlyList<string>? UnknownTextureAssetIds = null);
+    IReadOnlyList<string>? UnknownTextureAssetIds = null,
+    bool PreserveTextureDimensions = true,
+    string OriginalGlbSha256 = "");
 public sealed record ModelTextureImportPlan(IReadOnlyList<ModifiedAssetEntry> Changes, int UnchangedCount);
 
 public static class ModelTextureSetService
@@ -287,7 +289,7 @@ public static class ModelTextureSetService
         if (manifest.Textures.GroupBy(entry => entry.DdsFile, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
             throw new InvalidDataException("Texture set manifest contains duplicate texture filenames.");
 
-        var prepared = new List<(ModelTextureSetEntry Manifest, AssetEntry Asset, byte[] Root, byte[] OriginalFull, bool Changed)>();
+        var prepared = new List<(ModelTextureSetEntry Manifest, AssetEntry Asset, byte[] Root, byte[] OriginalFull, int OriginalWidth, int OriginalHeight, int OriginalMipCount, bool Changed)>();
         foreach (ModelTextureSetEntry item in manifest.Textures)
         {
             ValidateManifestEntry(item);
@@ -298,8 +300,14 @@ public static class ModelTextureSetService
                 throw new InvalidDataException($"Texture UUID '{item.AssetId}' does not match manifest path metadata.");
             string ddsPath = Path.Combine(root, item.DdsFile);
             if (!File.Exists(ddsPath)) throw new InvalidDataException($"Texture set is missing texture '{item.DdsFile}'.");
+            string contentDirectory = asset.ContentDirectory
+                ?? asset.SubEntries?.FirstOrDefault(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase))?.ContentDirectory
+                ?? throw new InvalidDataException($"Texture '{asset.Path}' has no content directory.");
+            TexturePackageDdsData original = TexturePackageDds.Extract(asset, contentDirectory);
             byte[] rootDds;
             int format;
+            int inputWidth;
+            int inputHeight;
             bool changed;
             if (manifest.SchemaVersion is 2 or 3)
             {
@@ -307,55 +315,49 @@ public static class ModelTextureSetService
                 string expectedExtension = manifest.SchemaVersion == 2 ? ".png" : ".tga";
                 if (!item.DdsFile.EndsWith(expectedExtension, StringComparison.OrdinalIgnoreCase))
                     throw new InvalidDataException($"{formatName} texture set entry '{item.DdsFile}' has the wrong file extension.");
-                byte[]? imageBytes = null;
-                if (manifest.SchemaVersion == 3)
-                {
-                    imageBytes = File.ReadAllBytes(ddsPath);
-                    ValidateTgaHeader(imageBytes, item);
-                }
-                using Image<Rgba32> image = imageBytes is null ? Image.Load<Rgba32>(ddsPath) : Image.Load<Rgba32>(imageBytes);
-                if (image.Width != item.Width || image.Height != item.Height) throw new InvalidDataException($"{formatName} '{item.DdsFile}' dimensions differ from its manifest.");
+                using Image<Rgba32> image = manifest.SchemaVersion == 3
+                    ? LoadTga(File.ReadAllBytes(ddsPath), item)
+                    : Image.Load<Rgba32>(ddsPath);
+                inputWidth = image.Width;
+                inputHeight = image.Height;
                 byte[] rgba = new byte[checked(image.Width * image.Height * 4)];
                 image.CopyPixelDataTo(rgba);
                 string hash = Convert.ToHexString(SHA256.HashData(rgba)).ToLowerInvariant();
-                string contentForTemplate = asset.ContentDirectory ?? asset.SubEntries?.FirstOrDefault(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase))?.ContentDirectory ?? throw new InvalidDataException($"Texture '{asset.Path}' has no content directory.");
-                changed = !hash.Equals(item.OriginalSha256, StringComparison.OrdinalIgnoreCase);
+                changed = !hash.Equals(item.OriginalSha256, StringComparison.OrdinalIgnoreCase) || inputWidth != original.Width || inputHeight != original.Height;
                 if (!changed)
                 {
-                    rootDds = TexturePackageDds.ExtractRootMip(asset, contentForTemplate).DdsBytes;
+                    rootDds = TexturePackageDds.ExtractRootMip(asset, contentDirectory).DdsBytes;
                     ParseDdsMetadata(rootDds, out int width, out int height, out format, out int mipCount);
                 }
                 else
                 {
-                    TexturePackageDdsData template = TexturePackageDds.Extract(asset, contentForTemplate);
-                    rootDds = TextureMipChainGenerator.EncodeRootRgba(rgba, image.Width, image.Height, template.DdsBytes);
+                    rootDds = TextureMipChainGenerator.EncodeRootRgba(rgba, image.Width, image.Height, original.DdsBytes, allowDimensionChange: true);
                     ParseDdsMetadata(rootDds, out int width, out int height, out format, out int mipCount);
                 }
             }
             else
             {
                 rootDds = File.ReadAllBytes(ddsPath);
-                ParseDdsMetadata(rootDds, out int width, out int height, out format, out int mipCount);
-                if (width != item.Width || height != item.Height || mipCount != 1) throw new InvalidDataException($"DDS '{item.DdsFile}' dimensions or root-only mip count differs from its manifest.");
-                changed = !Convert.ToHexString(SHA256.HashData(rootDds)).Equals(item.OriginalSha256, StringComparison.OrdinalIgnoreCase);
+                ParseDdsMetadata(rootDds, out inputWidth, out inputHeight, out format, out int mipCount);
+                if (mipCount != 1) throw new InvalidDataException($"DDS '{item.DdsFile}' must contain only its root mip.");
+                changed = !Convert.ToHexString(SHA256.HashData(rootDds)).Equals(item.OriginalSha256, StringComparison.OrdinalIgnoreCase) || inputWidth != original.Width || inputHeight != original.Height;
             }
-            string contentDirectory = asset.ContentDirectory
-                ?? asset.SubEntries?.FirstOrDefault(sub => sub.FileName.Equals("Image.img", StringComparison.OrdinalIgnoreCase))?.ContentDirectory
-                ?? throw new InvalidDataException($"Texture '{asset.Path}' has no content directory.");
-            TexturePackageDdsData original = TexturePackageDds.Extract(asset, contentDirectory);
             if (original.Width != item.Width || original.Height != item.Height || original.MipCount != item.MipCount)
                 throw new InvalidDataException($"Texture '{asset.Path}' no longer matches its export manifest.");
             if (format != item.DxgiFormat || !rootDds.AsSpan(84, 4).SequenceEqual("DX10"u8))
-                rootDds = TextureMipChainGenerator.TranscodeRoot(rootDds, original.DdsBytes);
-            prepared.Add((item, asset, rootDds, original.DdsBytes, changed));
+                rootDds = TextureMipChainGenerator.TranscodeRoot(rootDds, original.DdsBytes, allowDimensionChange: true);
+            prepared.Add((item, asset, rootDds, original.DdsBytes, original.Width, original.Height, original.MipCount, changed));
         }
 
         var changes = new List<ModifiedAssetEntry>();
         foreach (var item in prepared.Where(item => item.Changed))
         {
-            byte[] regenerated = TextureMipChainGenerator.Generate(item.Root, item.Manifest.MipCount);
-            TexturePackageDds.ValidateImportAgainstAsset(regenerated, item.Asset);
-            changes.Add(new ModifiedAssetEntry { ParentEntry = item.Asset, SubEntry = null, ModifiedData = regenerated, OriginalData = item.OriginalFull, Compress = compress });
+            ParseDdsMetadata(item.Root, out int width, out int height, out _, out _);
+            int targetMipCount = Math.Min(item.Manifest.MipCount, TextureMipChainGenerator.MaximumMipCount(width, height));
+            byte[] regenerated = TextureMipChainGenerator.Generate(item.Root, targetMipCount);
+            bool layoutChange = width != item.OriginalWidth || height != item.OriginalHeight || targetMipCount != item.OriginalMipCount;
+            TexturePackageDds.ValidateImportAgainstAsset(regenerated, item.Asset, layoutChange);
+            changes.Add(new ModifiedAssetEntry { ParentEntry = item.Asset, SubEntry = null, ModifiedData = regenerated, OriginalData = item.OriginalFull, Compress = compress, AllowTextureLayoutChange = layoutChange });
         }
         return new ModelTextureImportPlan(changes, prepared.Count - changes.Count);
     }
@@ -378,27 +380,25 @@ public static class ModelTextureSetService
             throw new InvalidDataException($"Manifest SHA-256 for '{entry.DdsFile}' is invalid.");
     }
 
-    private static void ValidateTgaHeader(ReadOnlySpan<byte> tga, ModelTextureSetEntry entry)
+    private static Image<Rgba32> LoadTga(byte[] tga, ModelTextureSetEntry entry)
     {
-        if (tga.Length < 18 || tga[0] != 0 || tga[1] != 0 || tga[2] != 2 || tga[16] != 32 ||
-            (tga[17] & 0x0F) != 8 || (tga[17] & 0x20) == 0 || (tga[17] & 0x10) != 0)
-            throw new InvalidDataException($"TGA '{entry.DdsFile}' must be uncompressed 32-bit true-color with 8-bit alpha and top-left origin.");
+        try
+        {
+            var detectedFormat = Image.DetectFormat(tga);
+            if (detectedFormat is null || !detectedFormat.Name.Equals(TgaFormat.Instance.Name, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"Texture '{entry.DdsFile}' is not a valid TGA image.");
 
-        if (BinaryPrimitives.ReadUInt16LittleEndian(tga.Slice(8, 2)) != 0 || BinaryPrimitives.ReadUInt16LittleEndian(tga.Slice(10, 2)) != 0)
-            throw new InvalidDataException($"TGA '{entry.DdsFile}' must use zero X/Y origin.");
-        int width = BinaryPrimitives.ReadUInt16LittleEndian(tga.Slice(12, 2));
-        int height = BinaryPrimitives.ReadUInt16LittleEndian(tga.Slice(14, 2));
-        if (width != entry.Width || height != entry.Height)
-            throw new InvalidDataException($"TGA '{entry.DdsFile}' dimensions differ from its manifest.");
-
-        int payloadEnd = checked(18 + width * height * 4);
-        bool noFooter = tga.Length == payloadEnd;
-        bool standardFooter = tga.Length == payloadEnd + 26 &&
-            BinaryPrimitives.ReadUInt32LittleEndian(tga.Slice(payloadEnd, 4)) == 0 &&
-            BinaryPrimitives.ReadUInt32LittleEndian(tga.Slice(payloadEnd + 4, 4)) == 0 &&
-            tga.Slice(payloadEnd + 8, 18).SequenceEqual("TRUEVISION-XFILE.\0"u8);
-        if (!noFooter && !standardFooter)
-            throw new InvalidDataException($"TGA '{entry.DdsFile}' has unexpected data outside its pixel payload.");
+            Image<Rgba32> image = Image.Load<Rgba32>(tga);
+            return image;
+        }
+        catch (InvalidDataException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidDataException($"TGA '{entry.DdsFile}' could not be decoded: {exception.Message}", exception);
+        }
     }
 
     private static string GetSafeDdsFileName(string assetFileName)

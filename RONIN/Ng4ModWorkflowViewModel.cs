@@ -29,6 +29,26 @@ public sealed partial class MainWindowViewModel
     }
 
     [RelayCommand]
+    public async Task ExportNg4ModelWorkspacePngAsync()
+    {
+        if (!TryGetSelectedModel(out AssetEntry model) || Library is null)
+            return;
+
+        var dialog = new OpenFolderDialog
+        {
+            Title = "Select a folder for the NG4 PNG model workspace"
+        };
+        if (dialog.ShowDialog() != true)
+            return;
+
+        await RunWorkflowAsync("Exporting GLB and PNG texture workspace...", () =>
+        {
+            Ng4ModWorkspaceExportResult result = Ng4ModWorkspaceService.ExportPng(model, Library.All, dialog.FolderName);
+            return $"Workspace exported: {result.WorkspacePath}";
+        });
+    }
+
+    [RelayCommand]
     public async Task ExportNg4TextureSetPngAsync()
     {
         if (!TryGetSelectedModel(out AssetEntry model) || Library is null)
@@ -105,8 +125,8 @@ public sealed partial class MainWindowViewModel
 
         await RunWorkflowAsync("Building and verifying NG4MOD v2 package...", () =>
         {
-            Ng4ModWorkspacePackageResult result = Ng4ModWorkspaceService.Package(glbDialog.FileName, Library, request);
-            return $"NG4MOD exported and verified: {result.PackagePath} ({result.ChangedTextureCount} changed texture(s)).";
+            Ng4ModWorkspacePackageResult result = Ng4ModWorkspaceService.PackageWorkspace(glbDialog.FileName, Library, request);
+            return $"NG4MOD exported and verified: {result.PackagePath} ({result.ChangedModelCount} changed model(s), {result.ChangedTextureCount} changed texture(s)).";
         });
     }
 

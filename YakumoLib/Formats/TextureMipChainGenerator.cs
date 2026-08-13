@@ -27,7 +27,7 @@ public static class TextureMipChainGenerator
         catch (Exception ex) { throw new InvalidDataException("DDS root mip could not be decoded.", ex); }
     }
 
-    public static byte[] EncodeRootRgba(byte[] rgba, int width, int height, byte[] templateDds)
+    public static byte[] EncodeRootRgba(byte[] rgba, int width, int height, byte[] templateDds, bool allowDimensionChange = false)
     {
         ArgumentNullException.ThrowIfNull(rgba);
         ArgumentNullException.ThrowIfNull(templateDds);
@@ -36,8 +36,9 @@ public static class TextureMipChainGenerator
         if (templateDds.Length < 148 || !templateDds.AsSpan(0, 4).SequenceEqual("DDS "u8) ||
             !templateDds.AsSpan(84, 4).SequenceEqual("DX10"u8))
             throw new InvalidDataException("A DX10 DDS template is required.");
-        if (width != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(16, 4))) ||
-            height != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(12, 4))))
+        if (!allowDimensionChange &&
+            (width != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(16, 4))) ||
+             height != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(12, 4)))))
             throw new InvalidDataException("RGBA dimensions differ from the texture template.");
 
         int formatCode = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(128, 4)));
@@ -46,12 +47,18 @@ public static class TextureMipChainGenerator
         byte[] payload = encoder.EncodeToRawBytes(rgba, width, height, PixelFormat.Rgba32)[0];
         byte[] result = new byte[148 + payload.Length];
         templateDds.AsSpan(0, 148).CopyTo(result);
+        if (allowDimensionChange)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(12, 4), checked((uint)height));
+            BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(16, 4), checked((uint)width));
+        }
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(28, 4), 1);
+        RewriteLinearSize(result, payload.Length);
         payload.CopyTo(result, 148);
         return result;
     }
 
-    public static byte[] TranscodeRoot(byte[] editedDds, byte[] templateDds)
+    public static byte[] TranscodeRoot(byte[] editedDds, byte[] templateDds, bool allowDimensionChange = false)
     {
         ArgumentNullException.ThrowIfNull(editedDds);
         ArgumentNullException.ThrowIfNull(templateDds);
@@ -63,9 +70,11 @@ public static class TextureMipChainGenerator
 
         int width = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(16, 4)));
         int height = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(12, 4)));
-        if (width != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(editedDds.AsSpan(16, 4))) ||
-            height != checked((int)BinaryPrimitives.ReadUInt32LittleEndian(editedDds.AsSpan(12, 4))))
+        int editedWidth = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(editedDds.AsSpan(16, 4)));
+        int editedHeight = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(editedDds.AsSpan(12, 4)));
+        if (!allowDimensionChange && (width != editedWidth || height != editedHeight))
             throw new InvalidDataException("Edited DDS dimensions differ from the texture template.");
+        if (allowDimensionChange) { width = editedWidth; height = editedHeight; }
 
         int formatCode = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(templateDds.AsSpan(128, 4)));
         CompressionFormat format = GetCompressionFormat(formatCode);
@@ -86,9 +95,23 @@ public static class TextureMipChainGenerator
             throw new InvalidDataException("Transcoded DDS root mip has an unexpected payload length.");
         byte[] result = new byte[148 + payload.Length];
         templateDds.AsSpan(0, 148).CopyTo(result);
+        if (allowDimensionChange)
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(12, 4), checked((uint)height));
+            BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(16, 4), checked((uint)width));
+        }
         BinaryPrimitives.WriteUInt32LittleEndian(result.AsSpan(28, 4), 1);
+        RewriteLinearSize(result, payload.Length);
         payload.CopyTo(result, 148);
         return result;
+    }
+
+    public static int MaximumMipCount(int width, int height)
+    {
+        if (width <= 0 || height <= 0) throw new ArgumentOutOfRangeException(nameof(width));
+        int count = 1;
+        for (int extent = Math.Max(width, height); extent > 1; extent >>= 1) count++;
+        return count;
     }
 
     public static byte[] Generate(byte[] rootDds, int targetMipCount)
@@ -101,7 +124,7 @@ public static class TextureMipChainGenerator
         int height = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(rootDds.AsSpan(12, 4)));
         int formatCode = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(rootDds.AsSpan(128, 4)));
         CompressionFormat format = GetCompressionFormat(formatCode);
-        int maximumMipCount = 1 + (int)Math.Floor(Math.Log2(Math.Max(width, height)));
+        int maximumMipCount = MaximumMipCount(width, height);
         if (targetMipCount <= 0 || targetMipCount > maximumMipCount)
             throw new InvalidDataException($"Mip count {targetMipCount} is invalid for {width}x{height}.");
 
@@ -147,6 +170,11 @@ public static class TextureMipChainGenerator
             }
         }
         return output.ToArray();
+    }
+
+    private static void RewriteLinearSize(byte[] dds, int payloadLength)
+    {
+        BinaryPrimitives.WriteUInt32LittleEndian(dds.AsSpan(20, 4), checked((uint)payloadLength));
     }
 
     private static ColorRgba32[] Downsample(ColorRgba32[] source, int width, int height, int formatCode)

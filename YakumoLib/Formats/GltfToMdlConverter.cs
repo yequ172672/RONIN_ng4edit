@@ -8,6 +8,9 @@ namespace YakumoLib.Formats;
 
 public static partial class GltfToMdlConverter
 {
+    private const int PlaceholderVertexLimit = 8;
+    private const float PlaceholderBoundsDiagonalLimit = 0.001f;
+
     public static byte[] Convert(string gltfPath, byte[] templateMdl)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(gltfPath);
@@ -85,7 +88,7 @@ public static partial class GltfToMdlConverter
         if (primitives.Count == 0)
             throw new InvalidDataException($"MDL batch {batchIndex} has no glTF primitives.");
 
-        ImportedBatch[] parts = primitives.Select(primitive => ReadPrimitive(node, primitive, batchIndex, boneByName,
+        ImportedBatch[] parts = primitives.Select(primitive => ReadPrimitive(node, primitive, template, batchIndex, boneByName,
             uvLayerCount, colorLayerCount, skinLayerCount)).ToArray();
         int vertexCount = parts.Sum(part => part.Positions.Length);
         int indexCount = parts.Sum(part => part.Indices.Length);
@@ -110,7 +113,7 @@ public static partial class GltfToMdlConverter
         return result;
     }
 
-    private static ImportedBatch ReadPrimitive(Node node, MeshPrimitive primitive,
+    private static ImportedBatch ReadPrimitive(Node node, MeshPrimitive primitive, MDLFullData template,
         int batchIndex, IReadOnlyDictionary<string, int> boneByName, int uvLayerCount, int colorLayerCount, int skinLayerCount)
     {
         Accessor positionsAccessor = primitive.GetVertexAccessor("POSITION")
@@ -164,7 +167,10 @@ public static partial class GltfToMdlConverter
             }
         }
 
-        ReadSkin(node, primitive, result, batchIndex, boneByName, skinLayerCount);
+        int? placeholderFallbackBone = IsTinyPlaceholderGeometry(result.Positions)
+            ? FindDominantTemplateBone(template, batchIndex)
+            : null;
+        ReadSkin(node, primitive, result, batchIndex, boneByName, skinLayerCount, placeholderFallbackBone);
         return result;
     }
 
@@ -226,7 +232,7 @@ public static partial class GltfToMdlConverter
     }
 
     private static void ReadSkin(Node node, MeshPrimitive primitive, ImportedBatch result, int batchIndex,
-        IReadOnlyDictionary<string, int> boneByName, int skinLayerCount)
+        IReadOnlyDictionary<string, int> boneByName, int skinLayerCount, int? placeholderFallbackBone)
     {
         Skin skin = node.Skin ?? throw new InvalidDataException($"Batch {batchIndex} has no skin.");
         for (int set = 0; set < skinLayerCount; set++)
@@ -248,8 +254,7 @@ public static partial class GltfToMdlConverter
                     if ((uint)skinJoint >= (uint)skin.Joints.Count)
                         throw new InvalidDataException($"Batch {batchIndex} vertex {vertex} references skin joint {skinJoint} outside the skin.");
                     string name = skin.Joints[skinJoint].Name ?? throw new InvalidDataException($"Batch {batchIndex} skin joint {skinJoint} has no name.");
-                    if (!boneByName.TryGetValue(name, out int globalBone))
-                        throw new InvalidDataException($"Batch {batchIndex} skin joint '{name}' is not present in the MDL template.");
+                    int globalBone = ResolveSkinBone(name, boneByName, placeholderFallbackBone, batchIndex);
                     result.Influences[vertex].Add((globalBone, weight));
                 }
             }
@@ -270,6 +275,52 @@ public static partial class GltfToMdlConverter
             }
             result.Influences[vertex] = merged.Select(x => (x.Bone, x.Weight / total)).ToList();
         }
+    }
+
+    internal static int ResolveSkinBone(string name, IReadOnlyDictionary<string, int> boneByName,
+        int? placeholderFallbackBone, int batchIndex)
+    {
+        if (boneByName.TryGetValue(name, out int globalBone)) return globalBone;
+        if (placeholderFallbackBone is int fallbackBone) return fallbackBone;
+        throw new InvalidDataException(
+            $"Batch {batchIndex} skin joint '{name}' is not present in the MDL template. Only tiny placeholder geometry can be rebound automatically.");
+    }
+
+    internal static bool IsTinyPlaceholderGeometry(IReadOnlyList<Vector3> positions)
+    {
+        if (positions.Count is 0 or > PlaceholderVertexLimit) return false;
+        Vector3 minimum = positions[0];
+        Vector3 maximum = positions[0];
+        for (int index = 1; index < positions.Count; index++)
+        {
+            minimum = Vector3.Min(minimum, positions[index]);
+            maximum = Vector3.Max(maximum, positions[index]);
+        }
+        return Vector3.Distance(minimum, maximum) <= PlaceholderBoundsDiagonalLimit;
+    }
+
+    internal static int? FindDominantTemplateBone(MDLFullData template, int batchIndex)
+    {
+        if ((uint)batchIndex >= (uint)template.Batches.Length) return null;
+        MDLBatch batch = template.Batches[batchIndex];
+        if (batch.vertexGroupID >= template.Groups.Length || batch.boneMapID >= template.BoneRemapTables.Length)
+            return null;
+
+        VertexGroup group = template.Groups[batch.vertexGroupID];
+        ushort[] remap = template.BoneRemapTables[batch.boneMapID];
+        var totals = new Dictionary<int, float>();
+        foreach (ushort vertex in template.GetBatchIndices(batchIndex).ToArray().Distinct())
+        {
+            if (vertex >= group.Positions.Length) continue;
+            foreach ((int localJoint, float weight) in MdlGltfConversion.GetSkinBindings(group, vertex))
+            {
+                if ((uint)localJoint >= (uint)remap.Length) continue;
+                int globalBone = remap[localJoint];
+                if ((uint)globalBone >= (uint)template.Bones.Length) continue;
+                totals[globalBone] = totals.GetValueOrDefault(globalBone) + weight;
+            }
+        }
+        return totals.OrderByDescending(pair => pair.Value).ThenBy(pair => pair.Key).Select(pair => (int?)pair.Key).FirstOrDefault();
     }
 
     private static void ExtendRemaps(ImportedBatch?[] imported, MDLBatch[] batches, ushort[][] remaps)

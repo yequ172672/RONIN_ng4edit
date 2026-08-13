@@ -88,6 +88,9 @@
                     </MenuItem>
                     <Separator/>
                     <MenuItem Header="NG4 Mod (GLB / PNG / TGA / NG4MOD)">
+                        <MenuItem Header="Export selected model workspace (GLB + PNG)"
+                                  IsEnabled="{Binding IsModelSelected}"
+                                  Command="{Binding ExportNg4ModelWorkspacePngCommand}"/>
                         <MenuItem Header="Export selected model workspace (GLB + TGA)"
                                   IsEnabled="{Binding IsModelSelected}"
                                   Command="{Binding ExportNg4ModelWorkspaceCommand}"/>
