@@ -1,6 +1,10 @@
 <img width="1260" height="706" alt="Ryu, displayed in the RONIN model previewer." src="https://github.com/user-attachments/assets/57d1bbe1-ddf4-4dbe-82f5-a2d29033b37a" />
 Ryu, displayed in the RONIN model previewer.
 
+# NG4MOD authoring skill
+
+For converting existing Ninja Gaiden 4 DLL or asset-replacement mods to raw NG4MOD v2 and integrating Runtime configuration UI, see the self-contained [NG4MOD authoring skill](skills/README.md).
+
 # Supported Games:
 [Ninja Gaiden 4](https://teamninja-studio.com/ng4/us/)
 

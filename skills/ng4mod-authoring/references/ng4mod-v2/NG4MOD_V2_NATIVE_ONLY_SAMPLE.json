@@ -1,0 +1,29 @@
+{
+  "format": "ng4mod",
+  "schema_version": 2,
+  "mod_id": "example.native-only",
+  "name": "NG4MOD v2 Native-only Structure Fixture",
+  "version": "1.0.0",
+  "author": "Example Developer",
+  "description": "Public format-only fixture. The four-byte payload is not a runnable DLL.",
+  "icon": "",
+  "dependencies": [],
+  "game": {
+    "id": "ninja-gaiden-4",
+    "asset_database_sha256": ""
+  },
+  "assets": [],
+  "files": [],
+  "native_libraries": [
+    {
+      "name": "example-hook.dll",
+      "load": true,
+      "exclusive_claims": [
+        "example.enemy-hook.v1"
+      ],
+      "payload_offset": 0,
+      "payload_size": 4,
+      "payload_sha256": "9f2981a7cc4d40a2a409dc895de64253acd819d7c0011c8e80b86fe899464e31"
+    }
+  ]
+}

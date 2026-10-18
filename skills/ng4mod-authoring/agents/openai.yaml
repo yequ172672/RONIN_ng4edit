@@ -1,0 +1,4 @@
+interface:
+  display_name: "NG4MOD 制作与 Runtime 接入"
+  short_description: "将现有 DLL 与资源替换迁移为 NG4MOD v2，接入游戏内参数界面"
+  default_prompt: "使用 $ng4mod-authoring 将我的现有 Mod 转换为 NG4MOD v2；有可配置 DLL 时接入 Runtime UI，并验证最终包。"
