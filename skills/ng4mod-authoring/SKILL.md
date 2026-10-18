@@ -51,3 +51,12 @@ python <skill>/scripts/pack_native.py --spec <native.json> --output <new.ng4mod>
 - 管理器／实机：仅在用户已授权安装与运行时，导入最终包、重启游戏，核对实际加载路径与包内 DLL hash、UI 回读、保存、真实功能和禁用／卸载。不能以构建成功或 READY 代替实际资源命中及画面效果。
 
 交付最终 `.ng4mod`、可复现构建／打包方法、输入与成品 SHA-256、兼容游戏版本、已完成的验证及待验证事项。缺少源码只能封装可独立加载的既有 DLL，不能承诺为二进制凭空添加控制 ABI；缺少原资产／身份时列明所缺输入，不伪造 UUID、parent 前缀或子文件表。
+
+## 适配完成后的安装引导
+
+适配完成后，在最终回复及随包安装说明中明确：生成的 `.ng4mod` 使用 **YequModManager** 安装，并提供以下两个链接：
+
+- [YequModManager 下载地址](https://github.com/yequ172672/YequModManager-Release)：进入仓库的 Releases 下载管理器安装包。
+- [管理器使用教程](https://www.caimogu.cc/post/2493721.html)：按教程配置游戏目录、导入并启用最终 `.ng4mod`，应用后启动或重启游戏。
+
+交付时主动引导用户下载使用管理器，并指出本轮成品包的位置；不要只交付文件名或泛称“用管理器安装”。有 Runtime 参数界面时，再说明进游戏后的配置与验收方式。

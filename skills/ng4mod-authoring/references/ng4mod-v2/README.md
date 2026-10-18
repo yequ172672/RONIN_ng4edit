@@ -4,6 +4,8 @@
 
 DLL 作者接入游戏内模组配置界面，请阅读同目录的 [Runtime GUI 接入指南](RUNTIME_INTEGRATION.md)；[ModControl.h](ModControl.h) 提供完整可选控制 ABI，可与本目录一起独立分享。
 
+成品 `.ng4mod` 使用 **YequModManager** 安装：从 [YequModManager 下载地址](https://github.com/yequ172672/YequModManager-Release) 的 Releases 获取安装包，按 [管理器使用教程](https://www.caimogu.cc/post/2493721.html) 配置游戏目录、导入并启用 Mod，应用后启动或重启游戏。
+
 本文中的 MUST、MUST NOT、SHOULD 和 MAY 分别表示必须、禁止、建议和可选。实现只有在完成容器、manifest、payload 和安装边界校验后，才应声明支持 NG4MOD v2。
 
 ## 1. 格式概览

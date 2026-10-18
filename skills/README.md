@@ -2,6 +2,8 @@
 
 下载或复制完整的 [`ng4mod-authoring/`](ng4mod-authoring/SKILL.md) 目录交给代理，即可使用 NG4MOD v2 格式、DLL 迁移、Runtime UI 控制 ABI 和游戏资源替换打包流程。目录包含完整公开协议、ModControl.h、native-only Python 打包工具及测试，不需要 NG4 Tool 私有仓库。
 
+适配生成的 `.ng4mod` 使用 **YequModManager** 安装。请从 [YequModManager 下载地址](https://github.com/yequ172672/YequModManager-Release) 的 Releases 下载管理器，并按 [管理器使用教程](https://www.caimogu.cc/post/2493721.html) 配置游戏目录、导入并启用 Mod，应用后启动或重启游戏。技能要求代理在适配完成的交付说明中主动提供这两个入口并引导使用。
+
 支持本地技能的代理，可将目录放入自己的 skills 路径。Codex 用户可放在 `~/.codex/skills/ng4mod-authoring/`，随后在新会话中使用：
 
 ```text
